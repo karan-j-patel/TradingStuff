@@ -142,8 +142,9 @@ Increases are gated on **elapsed live performance**, never on returns. A strateg
 that made money for three months has told you almost nothing, and scaling on a
 good quarter is how a small loss becomes a large one.
 
-The initial-capital figure is the one number here that is not an engineering
-judgment. It must not be delegated to Claude.
+The initial-capital figure is the one number in this document that is not an
+engineering judgment. It must not be delegated to a tool, an adviser, or a
+model, and it must be set before Gate 2 rather than at it.
 
 ## Position and exposure limits
 
@@ -185,10 +186,14 @@ returns. Trading on corrupt state costs more.
 
 ---
 
-## What I am not claiming
+## What this document does not claim
 
-I have never traded. This platform is built to find out whether a modest,
-documented effect survives real costs, not because I expect it to make money.
-The most likely honest outcome is that machine learning does not beat ridge
-regression net of costs, and that outcome gets published in the README with the
-same prominence as a positive one would.
+This platform is built to find out whether a modest, documented effect survives
+real costs, not on the expectation that it will make money. The most likely
+honest outcome is that machine learning does not beat ridge regression net of
+costs, and that outcome gets published with the same prominence a positive one
+would get.
+
+The thresholds above are set accordingly. They assume the strategy does not
+work until evidence says otherwise, rather than assuming it works and looking
+for a reason to stop.
