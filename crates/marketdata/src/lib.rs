@@ -13,9 +13,11 @@
 
 pub mod book;
 pub mod event;
+pub mod iex;
 
 pub use book::{BookError, Granularity, OrderBook};
 pub use event::{
     Aggressor, EventKind, LevelUpdate, MarketEvent, Nanos, OrderEvent, OrderId, PRICE_SCALE, Price,
     Qty, Side, TradingStatus, Venue,
 };
+pub use iex::{DeepReader, IexError, SymbolEvent};
