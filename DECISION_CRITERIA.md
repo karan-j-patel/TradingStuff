@@ -63,6 +63,235 @@ All of Gate 1, plus all of the following:
 > edge is real rather than the luckiest of everything tried. 0.95 means 95%
 > confident. It is not a return figure.
 
+---
+
+# Fast strand gates
+
+**Added 2026-08-08, before any fast-strand result existed.**
+
+Gates 1 and 2 above are stated in monthly units and govern the slow strand only.
+Nothing in them constrains a sub-second strategy, which inverted the purpose of
+this document for as long as the fast strand had no gates of its own. Adding
+gates is tightening, so these take effect immediately under the amendment rule.
+
+They are numbered F0 to F2 rather than renumbering the slow-strand gates, which
+are referenced elsewhere.
+
+The fast strand has two objectives and they are not judged the same way.
+**Execution** removes a cost already being paid and is judged against a naive
+baseline, not against a Sharpe ratio. **Microstructure prediction** creates a
+cost it must overcome and faces the full rigor treatment. Collapsing the two
+would let the easy win launder the hard one.
+
+## Gate F0. Before any expected-value claim is made at all
+
+No number describing what this strand might earn may be stated, written down, or
+used in any decision until all of these hold.
+
+- [ ] **Aggregate one-step top-N reconstruction** is validated against the
+      LOBSTER orderbook files. Applying one message to a known-correct book
+      must reproduce the aggregate size at every price the reference reports,
+      top **10 levels** per side, across **all five** sample symbols, with the
+      zero-size padding normalized before comparison. Any mismatch is a
+      failure, not a tolerance.
+
+      Standard as of 2026-08-08: **2,110,855 messages, zero size mismatches,
+      zero crossed books.**
+
+      Word this carefully whenever it is restated. It is not a finding that
+      "the reconstructor is correct". It is a finding about aggregate sizes at
+      shared prices, one message at a time.
+
+      This is listed first because everything below it is derived from the
+      book. A silently wrong reconstructor does not produce a wrong fill rate
+      and a right markout, it produces wrong numbers throughout while every
+      other box on this list still ticks.
+
+- [ ] It is written down that **queue position cannot be validated from LOBSTER
+      at all**, and that this is why the fill-rate rule below exists.
+
+      An orderbook row carries no order identities. It reports how much rests
+      at each price and says nothing about which orders compose it or in what
+      order they arrived. So no amount of reference data of this shape can
+      check a queue model, however good the code is.
+
+      That matters more than it sounds. Queue position is the entire economics
+      of a passive fill. Whether a resting order ever executes depends on where
+      it sits in the queue at its price, and two orders at the same price get
+      opposite outcomes based only on who arrived first. A queue simulator
+      could therefore be badly wrong while every test in the repository still
+      passes, and any backtested fill rate built on it is unvalidated at its
+      core.
+
+      **This vindicates the next rule rather than challenging it.** F0 already
+      requires the fill rate to be measured in paper trading and already states
+      that the captures cannot supply it. This is the evidence for why that
+      rule is correct rather than merely cautious. A future session reading
+      "measure it in paper trading" as excessive caution, and proposing to
+      substitute a backtested estimate, is proposing to substitute a number
+      that nothing has ever checked.
+
+- [ ] Passive fill rate is **measured**, not assumed. Reported as fills over
+      attempts, with the count, over at least **20 trading days** of paper
+      trading.
+- [ ] It is written down that this cannot be measured from the IEX or LOBSTER
+      captures, because neither contains our orders. A backtest can say where
+      our order would have rested. It cannot say whether it would have filled.
+- [ ] Decision-to-acknowledgement latency is measured and reported as a
+      distribution, median and p95 and p99. A point estimate hides the tail,
+      and the tail is when it matters.
+
+- [ ] The **latency horizon** is fixed here, at the measured p99, and written
+      down. Gate F1 tests against that recorded number and not against a fresh
+      one. A horizon re-derived later would move to wherever the strategy
+      needed it to be.
+
+- [ ] **Sigma of daily profit and loss** is measured across the same 20 days
+      and written down. The loss caps below use it, and it is fixed at this
+      point. It is never re-estimated from live trading, because a strategy
+      that starts losing more would otherwise widen its own cap exactly when
+      the cap is doing its job.
+- [ ] Quoted spread at decision time is recorded per order, so realized capture
+      can be compared against it rather than assumed equal to it.
+- [ ] Every microstructure hypothesis is in the trial counter, including every
+      point of every hyperparameter grid.
+
+## Gate F1. Before the execution layer routes one real order
+
+Execution is judged against the cost of not having it.
+
+| Criterion | Threshold |
+|---|---|
+| Parent orders measured in paper trading | ≥ **200** |
+| Implementation shortfall vs naive market order at decision time | better on the mean **and** on ≥ **60%** of parent orders |
+| Markouts at **1s, 10s and 60s** after every passive fill | all three reported, none omitted |
+| Mean markout at 60s after a passive fill | must not exceed the spread captured on that fill |
+| Realized spread capture, measured against the **NBBO** at decision time | reported per order |
+| Latency p99, signal to acknowledgement | at or below the horizon recorded at Gate F0 |
+| Fills the reconciliation could not match to an order | **0** |
+
+> Spread capture is measured against the national best bid and offer, never
+> against one venue's own book. IEX alone is roughly two to three percent of
+> consolidated volume and quotes wider than the NBBO, so measuring against it
+> would flatter every result. Our own capture put AAPL at 9 cents on IEX, which
+> is not what a routed order pays.
+
+> **Markout** is where the price went after your fill. Capturing two cents of
+> spread and then watching the price move three cents against you is a loss
+> dressed as a saving. It is the standard measure of adverse selection, which is
+> the risk that whoever traded with you knew something.
+
+## Gate F2. Before the prediction strategy trades real money
+
+All of Gate F1, plus all of the following.
+
+| Criterion | Threshold |
+|---|---|
+| Paper trading duration | ≥ **60 trading days**, uninterrupted |
+| Round trips completed in paper | ≥ **2,000** |
+| Deflated Sharpe, scoped | ≥ **0.95** |
+| Deflated Sharpe, lifetime | ≥ **0.90** |
+| Beats the execution layer alone, running a null signal, net of costs | required |
+| Beats random entry at matched turnover and holding period | required |
+| Beats **logistic regression on order book imbalance**, same features, net of costs | required |
+| Realized spread capture vs quoted spread | reported, and the gap explained |
+
+Calendar time alone is a weak gate at this frequency, which is why round trips
+are required alongside it. Sixty days of an idle strategy proves nothing.
+
+> Order book imbalance is the ratio of resting size on the bid to resting size
+> on the ask. That it predicts short-horizon direction is one of the
+> longest-known facts in microstructure. A complex model that merely
+> rediscovers it has found nothing, and without this row it would look like a
+> result. This is the fast strand's equivalent of the slow strand having to
+> beat ridge regression.
+
+## Hard loss caps for the fast strand
+
+These are enforced in code, not by a human watching a screen. A cap that
+depends on someone noticing is not a cap. The check runs in the order path and
+refuses to submit once tripped, and a strategy that cannot reach the check must
+not be allowed to send orders at all.
+
+They halt automatically. They are not advisory and there is no discretion.
+
+| Trigger | Action |
+|---|---|
+| Daily loss exceeding the **daily cap** defined below | halt the strand for the remainder of the day |
+| Loss of **3x the daily cap** over any rolling 5 trading days | halt the strand pending written review |
+| Fast-strand allocation | ≤ **20%** of committed capital until Gate F2 has held for 60 days |
+| Notional per position | ≤ **10%** of fast-strand allocation |
+
+**The daily cap** is the larger of **1% of fast-strand allocation** and **0.5
+sigma of daily profit and loss** as measured at Gate F0 and fixed there.
+
+A flat 1% does not survive contact with the arithmetic. At the initial cap the
+strand holds $10,000, so 1% is $100, and a strategy doing hundreds of round
+trips a day has daily variance well above that. It would halt on noise most
+days, and a cap that trips constantly is a cap that gets argued away. The
+sigma term makes the number derivable from what the strategy actually does
+while keeping the 1% as a floor.
+
+The sigma is fixed at Gate F0 and never re-estimated from live trading. A cap
+that tracks live volatility widens exactly when the strategy is deteriorating,
+which is when it is most needed.
+
+### The size the allocation actually permits
+
+At $50,000 committed and a 20% cap, the fast strand holds **$10,000**, so a
+position is at most **$1,000**. That is 2 shares of a $500 stock and about 17
+of a $60 one.
+
+This is written down because the struck arithmetic in the handoff assumed 800
+shares, which at any liquid price is several times the entire allocation. One
+of those two numbers had to be fiction and it was the 800.
+
+**The strategy design fits inside this constraint, not the reverse.** If a
+sub-second strategy needs size that this allocation cannot fund, that is a
+finding to confront at design time and it belongs in the record. It is not a
+reason to raise the allocation, and raising it would be a weakening subject to
+the 30-day rule.
+
+> The caps are tighter than the slow strand's drawdown halt because the failure
+> mode is different. A monthly strategy loses slowly enough to notice. A
+> sub-second strategy with a sign error loses for as long as it is switched on.
+
+**The bold numbers in this section are risk-tolerance decisions and are
+provisional until ratified.** The structure and the units are engineering. How
+much money to risk is not.
+
+### Amendments to this section
+
+Everything here was added or tightened on 2026-08-08, before any fast-strand
+result existed. Tightening takes effect immediately, so none of it waited.
+
+- **2026-08-08.** Section created. Gates F0 to F2 and the loss caps.
+- **2026-08-08.** LOBSTER book validation added to F0, listed first. Every
+  other measurement in F0 is derived from the reconstructed book, so a wrong
+  book yields wrong numbers while every other box still ticks.
+- **2026-08-08.** That checkbox reworded to say what was actually validated,
+  aggregate one-step top-N reconstruction, after an adversarial review found
+  the claim was being stated as "the reconstructor is correct". Standard
+  recorded as 2,110,855 messages with zero mismatches.
+- **2026-08-08.** Added the queue-position finding to F0. It cannot be
+  validated from LOBSTER at all, since an orderbook row carries no order
+  identities, and it is the entire economics of a passive fill. Recorded as
+  the justification for the paper-trading fill-rate rule so that rule is not
+  later mistaken for excessive caution.
+- **2026-08-08.** Daily loss cap changed from a flat 1% to the larger of 1%
+  and 0.5 sigma. A $100 cap on a $10,000 allocation would have halted on noise
+  most days, and a cap that trips constantly is one that gets weakened.
+- **2026-08-08.** Notional per position added at 10% of allocation, and the
+  size the allocation actually permits written out, after the struck 800-share
+  arithmetic was found to exceed the whole allocation several times over.
+- **2026-08-08.** Logistic regression on order book imbalance added to F2, so
+  the fast strand has the simple-model baseline the slow strand already had in
+  ridge regression.
+- **2026-08-08.** Latency horizon pinned to the p99 recorded at F0 rather than
+  left as "the horizon the scheduler assumes", which was defined nowhere.
+
+---
+
 ## Capital
 
 ### The breadth constraint that comes first
