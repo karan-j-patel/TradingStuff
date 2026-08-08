@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+# Versions pinned to the latest resolved from crates.io on 2026-08-07.
+# Refresh with `cargo update` plus a bump here rather than letting these drift.
+[workspace.dependencies]
+jiff = { version = "0.2.35", features = ["serde"] }
+rust_decimal = { version = "1.42.1", features = ["serde-with-str"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.19"
