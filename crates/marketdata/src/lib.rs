@@ -11,8 +11,10 @@
 //! files alongside their own reconstructed books, which gives this crate a
 //! reference output to reproduce exactly rather than only self-consistency.
 
+pub mod book;
 pub mod event;
 
+pub use book::{BookError, Granularity, OrderBook};
 pub use event::{
     Aggressor, EventKind, LevelUpdate, MarketEvent, Nanos, OrderEvent, OrderId, PRICE_SCALE, Price,
     Qty, Side, TradingStatus, Venue,
