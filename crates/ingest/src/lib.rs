@@ -13,8 +13,8 @@ pub mod provider;
 pub mod schema;
 
 pub use provider::{
-    DateRange, FundamentalRecord, FundamentalSource, PriceSource, ReportBasis, Revision,
-    SourceError, detect_revisions, visible_as_of,
+    DateRange, FilingKey, FundamentalRecord, FundamentalSource, PriceSource, ReportBasis,
+    ReportScope, Revision, RevisionReport, SourceError, detect_revisions, visible_as_of,
 };
 pub use schema::{
     AdjustmentJump, AssetKey, PermanentId, PriceBar, Reject, ValidationReport,

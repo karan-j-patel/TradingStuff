@@ -151,10 +151,31 @@ pub struct FundamentalRecord {
     /// Whether these figures are as originally filed or later restated.
     pub basis: ReportBasis,
 
+    /// How much time these figures cover. Quarterly, annual, and trailing
+    /// twelve-month reports for one company can share a period end.
+    pub scope: ReportScope,
+
+    /// Vendor filing identifier when the source exposes one.
+    pub filing_id: Option<String>,
+
     /// Field name to value. Deliberately untyped: fundamental fields number in
     /// the hundreds and differ per vendor, so the panel layer maps them rather
     /// than this crate hardcoding a schema it cannot keep current.
     pub fields: std::collections::BTreeMap<String, rust_decimal::Decimal>,
+}
+
+impl FundamentalRecord {
+    /// The identity of the filing this record describes.
+    pub fn key(&self) -> FilingKey {
+        FilingKey {
+            asset: self.asset.clone(),
+            period_end: self.period_end,
+            basis: self.basis,
+            scope: self.scope,
+            as_reported: self.as_reported,
+            filing_id: self.filing_id.clone(),
+        }
+    }
 }
 
 /// Whether a figure is what the company originally said, or what it says now.
@@ -174,6 +195,65 @@ impl ReportBasis {
     pub fn is_backtest_safe(&self) -> bool {
         matches!(self, ReportBasis::AsReported)
     }
+}
+
+/// How much time a report covers.
+///
+/// Independent of [`ReportBasis`], and conflating the two loses information.
+/// Sharadar's six dimensions are exactly the product of these two axes:
+///
+/// | dimension | basis       | scope      |
+/// |-----------|-------------|------------|
+/// | `ARQ`     | AsReported  | Quarterly  |
+/// | `ART`     | AsReported  | TrailingTwelveMonths |
+/// | `ARY`     | AsReported  | Annual     |
+/// | `MRQ`     | Restated    | Quarterly  |
+/// | `MRT`     | Restated    | TrailingTwelveMonths |
+/// | `MRY`     | Restated    | Annual     |
+///
+/// This matters for identity, not just labelling. A company's Q4 and its full
+/// year both end on 31 December, so an annual and a quarterly record share an
+/// asset, a period end, and a basis. Without scope they are indistinguishable,
+/// and revenue figures differing by a factor of four look like a vendor
+/// rewriting history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReportScope {
+    Quarterly,
+    Annual,
+    TrailingTwelveMonths,
+}
+
+/// What makes one filing distinct from another.
+///
+/// Every field is load-bearing. Dropping any one of them merges records that
+/// describe genuinely different things, and the merge is silent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FilingKey {
+    pub asset: AssetKey,
+    pub period_end: Date,
+    pub basis: ReportBasis,
+    pub scope: ReportScope,
+
+    /// The day this filing became public.
+    ///
+    /// Included because an amendment is a **new public event**, not a change to
+    /// an existing one. An original 10-Q and a later 10-Q/A share an asset, a
+    /// period end, a basis, and a scope; only the publication date separates
+    /// them. Without it, a company amending its own filing is indistinguishable
+    /// from a vendor silently rewriting history, which inverts the exact
+    /// judgement [`detect_revisions`] exists to make.
+    ///
+    /// The cost is one weaker signal: a vendor that *corrects a filing date*
+    /// shows up as one filing disappearing and another appearing, rather than
+    /// as a revision. Amendments are far more common and far more damaging to
+    /// misread, so the trade is worth taking.
+    pub as_reported: Date,
+
+    /// Vendor filing identifier when available. An SEC accession number, or a
+    /// vendor's own id. An additional discriminator rather than a replacement
+    /// for the publication date, since some vendors reuse ids across amendments
+    /// and many expose none at all.
+    pub filing_id: Option<String>,
 }
 
 /// A source of fundamental data.
@@ -245,32 +325,94 @@ pub struct Revision {
     pub then_observed: Date,
 }
 
+/// The outcome of comparing two snapshots.
+#[derive(Debug, Default, PartialEq)]
+pub struct RevisionReport {
+    /// Values that changed between the two observations.
+    pub revisions: Vec<Revision>,
+    /// Filings whose key appeared more than once within a single snapshot.
+    ///
+    /// Surfaced rather than silently deduplicated. A repeated key means the
+    /// identity is not fine enough for this source, and any comparison against
+    /// it is arbitrary — whichever duplicate happened to be indexed last would
+    /// win. Callers should treat this as a data-modelling defect to fix, not a
+    /// warning to ignore.
+    pub ambiguous: Vec<FilingKey>,
+}
+
+impl RevisionReport {
+    pub fn is_clean(&self) -> bool {
+        self.revisions.is_empty() && self.ambiguous.is_empty()
+    }
+}
+
 /// Compare two snapshots of the same filings and report values that moved.
 ///
-/// This is the mechanism that makes point-in-time claims falsifiable rather
-/// than merely asserted. Re-fetch history periodically, diff against what was
-/// stored, and a vendor silently rewriting the past becomes a visible event
-/// instead of a slow corruption of every downstream result.
+/// Re-fetch history periodically, diff against what was stored, and a vendor
+/// silently rewriting the past becomes a visible event rather than a slow
+/// corruption of every downstream result.
 ///
-/// Records are matched on (asset, period_end, basis). Fields present in one
-/// snapshot but absent from the other are ignored — a vendor adding a column is
-/// not a revision of existing data.
+/// Records are matched on [`FilingKey`]. Fields present in one snapshot but
+/// absent from the other are ignored, since a vendor adding a column is not a
+/// revision of existing data.
+///
+/// # What this cannot catch
+///
+/// **First-pull contamination.** If the first time you ever fetch 2024 data is
+/// in 2026, and the vendor already rewrote it, there is no earlier snapshot to
+/// diff against and this function reports nothing. No client-side mechanism can
+/// detect that, because the evidence never existed locally.
+///
+/// The only real defence is a source whose history is immutable by
+/// construction. SEC XBRL submissions qualify: each is a dated document that
+/// cannot be edited after filing, so "as reported" is a property of the archive
+/// rather than a promise from a vendor. Where such a source is available it
+/// should be preferred over any amount of diffing.
+///
+/// **Unfetched history** is the same problem in a different shape. This only
+/// covers filings actually present in both snapshots.
 pub fn detect_revisions(
     earlier: &[FundamentalRecord],
     later: &[FundamentalRecord],
-) -> Vec<Revision> {
+) -> RevisionReport {
     use std::collections::HashMap;
 
-    let index: HashMap<(&AssetKey, Date, ReportBasis), &FundamentalRecord> = earlier
+    // Group rather than index, so a repeated key is visible instead of being
+    // resolved by whichever record happened to be inserted last. Comparing
+    // against an arbitrarily-chosen duplicate produces a revision row that
+    // looks authoritative and is not, and a false alarm in an audit is worse
+    // than a gap because it teaches operators to ignore the alarm.
+    let mut by_key: HashMap<FilingKey, Vec<&FundamentalRecord>> = HashMap::new();
+    for record in earlier {
+        by_key.entry(record.key()).or_default().push(record);
+    }
+    let mut later_by_key: HashMap<FilingKey, Vec<&FundamentalRecord>> = HashMap::new();
+    for record in later {
+        later_by_key.entry(record.key()).or_default().push(record);
+    }
+
+    let mut ambiguous: Vec<FilingKey> = by_key
         .iter()
-        .map(|record| ((&record.asset, record.period_end, record.basis), record))
+        .chain(later_by_key.iter())
+        .filter(|(_, records)| records.len() > 1)
+        .map(|(key, _)| key.clone())
         .collect();
 
     let mut revisions = Vec::new();
-    for current in later {
-        let Some(previous) = index.get(&(&current.asset, current.period_end, current.basis)) else {
+    for (key, current_records) in &later_by_key {
+        // Only compare where exactly one record exists on each side. Anything
+        // else is not uniquely identified, and is reported as ambiguous above
+        // rather than guessed at.
+        let [current] = current_records.as_slice() else {
+            continue;
+        };
+        let Some(previous_records) = by_key.get(key) else {
             continue; // newly appeared filing, not a revision
         };
+        let [previous] = previous_records.as_slice() else {
+            continue;
+        };
+
         for (field, now) in &current.fields {
             let Some(was) = previous.fields.get(field) else {
                 continue; // new column
@@ -288,7 +430,23 @@ pub fn detect_revisions(
             }
         }
     }
-    revisions
+
+    // HashMap iteration is randomised per process, so both outputs are sorted
+    // for a result that is stable across runs.
+    revisions.sort_by(|a, b| {
+        a.asset
+            .ticker
+            .cmp(&b.asset.ticker)
+            .then(a.period_end.cmp(&b.period_end))
+            .then(a.field.cmp(&b.field))
+    });
+
+    ambiguous.sort_by_key(|key| (key.asset.ticker.clone(), key.period_end));
+    ambiguous.dedup();
+    RevisionReport {
+        revisions,
+        ambiguous,
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +466,8 @@ mod tests {
             observed_at: as_reported,
             source: "test".into(),
             basis,
+            scope: ReportScope::Quarterly,
+            filing_id: None,
             fields: BTreeMap::new(),
         }
     }
@@ -323,6 +483,8 @@ mod tests {
             observed_at,
             source: "test".into(),
             basis: ReportBasis::AsReported,
+            scope: ReportScope::Quarterly,
+            filing_id: None,
             fields,
         }
     }
@@ -407,33 +569,144 @@ mod tests {
 
     #[test]
     fn comparing_snapshots_does_detect_the_revision() {
-        let revisions = detect_revisions(
+        let report = detect_revisions(
             &[snapshot(date(2024, 8, 1), 100)],
             &[snapshot(date(2025, 3, 1), 999)],
         );
-        assert_eq!(revisions.len(), 1);
-        assert_eq!(revisions[0].field, "revenue");
-        assert_eq!(revisions[0].was, rust_decimal::Decimal::from(100));
-        assert_eq!(revisions[0].now, rust_decimal::Decimal::from(999));
-        assert_eq!(revisions[0].first_observed, date(2024, 8, 1));
+        assert_eq!(report.revisions.len(), 1);
+        assert_eq!(report.revisions[0].field, "revenue");
+        assert_eq!(report.revisions[0].was, rust_decimal::Decimal::from(100));
+        assert_eq!(report.revisions[0].now, rust_decimal::Decimal::from(999));
+        assert_eq!(report.revisions[0].first_observed, date(2024, 8, 1));
     }
 
     #[test]
     fn an_unchanged_figure_is_not_a_revision() {
-        let revisions = detect_revisions(
+        let report = detect_revisions(
             &[snapshot(date(2024, 8, 1), 100)],
             &[snapshot(date(2025, 3, 1), 100)],
         );
         assert!(
-            revisions.is_empty(),
+            report.is_clean(),
             "same value re-observed is not a revision"
         );
     }
 
     #[test]
     fn a_newly_appeared_filing_is_not_a_revision() {
-        let revisions = detect_revisions(&[], &[snapshot(date(2025, 3, 1), 100)]);
-        assert!(revisions.is_empty());
+        let report = detect_revisions(&[], &[snapshot(date(2025, 3, 1), 100)]);
+        assert!(report.is_clean());
+    }
+
+    /// Same asset, same period end, same basis — but an annual report and a
+    /// quarterly one. Round 2 of review caught these keying identically.
+    fn scoped(scope: ReportScope, revenue: i64) -> FundamentalRecord {
+        let mut record = snapshot(date(2026, 3, 1), revenue);
+        record.period_end = date(2025, 12, 31);
+        record.scope = scope;
+        record
+    }
+
+    #[test]
+    fn annual_and_quarterly_sharing_a_period_end_are_different_filings() {
+        let report = detect_revisions(
+            &[scoped(ReportScope::Annual, 4_000)],
+            &[scoped(ReportScope::Quarterly, 1_000)],
+        );
+        assert!(
+            report.is_clean(),
+            "a full year and its Q4 are different filings, not a 4x revision"
+        );
+    }
+
+    #[test]
+    fn a_revision_within_one_scope_is_still_caught() {
+        let report = detect_revisions(
+            &[scoped(ReportScope::Annual, 4_000)],
+            &[scoped(ReportScope::Annual, 4_200)],
+        );
+        assert_eq!(report.revisions.len(), 1, "same scope, changed value");
+    }
+
+    #[test]
+    fn a_duplicate_key_within_one_snapshot_is_reported_not_swallowed() {
+        // Two records that key identically cannot be compared meaningfully;
+        // whichever indexed last would arbitrarily win.
+        let report = detect_revisions(
+            &[
+                scoped(ReportScope::Annual, 100),
+                scoped(ReportScope::Annual, 200),
+            ],
+            &[],
+        );
+        assert_eq!(
+            report.ambiguous.len(),
+            1,
+            "ambiguity surfaced, not silently deduped"
+        );
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn a_filing_id_separates_otherwise_identical_records() {
+        let mut original = scoped(ReportScope::Annual, 100);
+        original.filing_id = Some("0000320193-26-000001".into());
+        let mut amended = scoped(ReportScope::Annual, 200);
+        amended.filing_id = Some("0000320193-26-000002".into());
+
+        let report = detect_revisions(&[original], &[amended]);
+        assert!(
+            report.is_clean(),
+            "an amended filing is a new document, not a revision of the original"
+        );
+    }
+
+    /// Round 3 of review: an amendment is a new public event, not a rewrite.
+    #[test]
+    fn an_amended_filing_is_not_a_revision_of_the_original() {
+        let original = scoped(ReportScope::Quarterly, 1_000);
+        let mut amended = scoped(ReportScope::Quarterly, 1_100);
+        amended.as_reported = date(2026, 5, 15); // 10-Q/A filed later
+        // No filing_id on either, which is the case the previous key missed.
+        assert_eq!(original.filing_id, None);
+
+        let report = detect_revisions(&[original], &[amended]);
+        assert!(
+            report.is_clean(),
+            "a company amending its own filing is public information, \
+             not a vendor silently rewriting history"
+        );
+    }
+
+    #[test]
+    fn the_same_filing_re_observed_is_still_compared() {
+        // Guards against over-correcting: adding as_reported to the key must
+        // not stop the primary case from working.
+        let first_pull = scoped(ReportScope::Quarterly, 1_000);
+        let mut second_pull = scoped(ReportScope::Quarterly, 1_500);
+        second_pull.observed_at = date(2026, 6, 1); // same filing, later snapshot
+        assert_eq!(first_pull.as_reported, second_pull.as_reported);
+
+        let report = detect_revisions(&[first_pull], &[second_pull]);
+        assert_eq!(report.revisions.len(), 1, "same filing, changed value");
+    }
+
+    #[test]
+    fn an_ambiguous_key_produces_no_revision_rows() {
+        // Two identical keys on the earlier side. Any comparison would be
+        // against an arbitrarily chosen duplicate.
+        let report = detect_revisions(
+            &[
+                scoped(ReportScope::Annual, 100),
+                scoped(ReportScope::Annual, 200),
+            ],
+            &[scoped(ReportScope::Annual, 300)],
+        );
+        assert_eq!(report.ambiguous.len(), 1, "ambiguity is reported");
+        assert!(
+            report.revisions.is_empty(),
+            "a knowingly-arbitrary comparison is worse than none"
+        );
     }
 
     #[test]
@@ -443,6 +716,6 @@ mod tests {
         later
             .fields
             .insert("ebitda".into(), rust_decimal::Decimal::from(42));
-        assert!(detect_revisions(&[earlier], &[later]).is_empty());
+        assert!(detect_revisions(&[earlier], &[later]).is_clean());
     }
 }

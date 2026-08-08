@@ -15,6 +15,7 @@
 //! - `#[derive(...)]` writes boilerplate implementations at compile time. It is
 //!   closest to a class decorator, except it runs before the program exists.
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use jiff::civil::Date;
@@ -302,39 +303,56 @@ pub struct AdjustmentJump {
 /// is either a real action or vendor corruption, and both deserve a human
 /// glance before the data reaches a return series.
 ///
-/// `bars` must be one asset's history. Sorting happens here so callers cannot
-/// silently pass an unsorted series and get meaningless results.
+/// `bars` may contain any mix of assets and any ordering. Grouping and sorting
+/// happen here rather than being a documented precondition, because a
+/// precondition a caller can violate silently is not a safeguard. A mixed batch
+/// compared as one series would diff one company's adjustment factor against
+/// another's and report fake splits, which is worse than no check at all —
+/// operators learn to ignore an alarm that cries wolf.
 pub fn find_adjustment_jumps(bars: &[PriceBar], tolerance: Decimal) -> Vec<AdjustmentJump> {
-    let mut sorted: Vec<&PriceBar> = bars.iter().collect();
-    sorted.sort_by_key(|bar| bar.date);
-
-    let mut jumps = Vec::new();
-    let mut previous: Option<(Date, Decimal)> = None;
-
-    for bar in sorted {
-        if bar.close <= Decimal::ZERO {
-            continue; // already rejected by validate(); nothing to compare
-        }
-        let factor = bar.close_adj / bar.close;
-
-        if let Some((_, prior_factor)) = previous
-            && prior_factor > Decimal::ZERO
-        {
-            let ratio = factor / prior_factor;
-            let deviation = (ratio - Decimal::ONE).abs();
-            if deviation > tolerance {
-                jumps.push(AdjustmentJump {
-                    asset: bar.asset.clone(),
-                    date: bar.date,
-                    previous_factor: prior_factor,
-                    factor,
-                    ratio,
-                });
-            }
-        }
-        previous = Some((bar.date, factor));
+    let mut by_asset: HashMap<&AssetKey, Vec<&PriceBar>> = HashMap::new();
+    for bar in bars {
+        by_asset.entry(&bar.asset).or_default().push(bar);
     }
 
+    let mut jumps = Vec::new();
+    for series in by_asset.values_mut() {
+        series.sort_by_key(|bar| bar.date);
+
+        let mut previous: Option<Decimal> = None;
+        for bar in series.iter() {
+            if bar.close <= Decimal::ZERO {
+                continue; // already rejected by validate(); nothing to compare
+            }
+            let factor = bar.close_adj / bar.close;
+
+            if let Some(prior_factor) = previous
+                && prior_factor > Decimal::ZERO
+            {
+                let ratio = factor / prior_factor;
+                if (ratio - Decimal::ONE).abs() > tolerance {
+                    jumps.push(AdjustmentJump {
+                        asset: bar.asset.clone(),
+                        date: bar.date,
+                        previous_factor: prior_factor,
+                        factor,
+                        ratio,
+                    });
+                }
+            }
+            previous = Some(factor);
+        }
+    }
+
+    // HashMap iteration order is randomised per process, so sort for a stable
+    // result. A check whose output reorders between runs is unusable in a diff
+    // or a regression test.
+    jumps.sort_by(|a, b| {
+        a.asset
+            .ticker
+            .cmp(&b.asset.ticker)
+            .then(a.date.cmp(&b.date))
+    });
     jumps
 }
 
@@ -557,6 +575,53 @@ mod tests {
         assert_eq!(
             find_adjustment_jumps(&ordered, tol),
             find_adjustment_jumps(&shuffled, tol)
+        );
+    }
+
+    /// Round 2 of review caught this: a mixed batch was compared as one series,
+    /// diffing one company's adjustment factor against another's.
+    #[test]
+    fn a_mixed_batch_does_not_produce_cross_asset_false_positives() {
+        let tol = Decimal::from_f64(0.01).expect("representable");
+        let mut alpha = bar_with_adj(1, 100.0, 50.0); // factor 0.5
+        let mut beta = bar_with_adj(2, 100.0, 10.0); // factor 0.1, different company
+        alpha.asset = AssetKey::ticker_only("ALPHA");
+        beta.asset = AssetKey::ticker_only("BETA");
+
+        let mut alpha2 = bar_with_adj(3, 100.0, 50.0);
+        alpha2.asset = AssetKey::ticker_only("ALPHA");
+
+        // Interleaved by date, which is what a real multi-asset batch looks like.
+        let jumps = find_adjustment_jumps(&[alpha, beta, alpha2], tol);
+        assert!(
+            jumps.is_empty(),
+            "each asset's factor is stable within itself; only cross-asset \
+             comparison would report a jump"
+        );
+    }
+
+    #[test]
+    fn output_order_is_stable_across_runs() {
+        // HashMap iteration is randomised per process, so an unsorted result
+        // would reorder between runs and be useless in a diff or a snapshot test.
+        let tol = Decimal::from_f64(0.01).expect("representable");
+        let mut batch = Vec::new();
+        for (ticker, adj) in [("ZETA", 1000.0), ("ALPHA", 1000.0), ("MU", 1000.0)] {
+            let mut first = bar_with_adj(1, 10.0, 5.0);
+            let mut second = bar_with_adj(2, 10.0, adj);
+            first.asset = AssetKey::ticker_only(ticker);
+            second.asset = AssetKey::ticker_only(ticker);
+            batch.push(first);
+            batch.push(second);
+        }
+        let tickers: Vec<String> = find_adjustment_jumps(&batch, tol)
+            .iter()
+            .map(|jump| jump.asset.ticker.clone())
+            .collect();
+        assert_eq!(
+            tickers,
+            vec!["ALPHA", "MU", "ZETA"],
+            "sorted by ticker then date"
         );
     }
 

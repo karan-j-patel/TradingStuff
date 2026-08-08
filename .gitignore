@@ -31,3 +31,4 @@ target/
 
 # Local agent context — personal, never published
 CLAUDE.local.md
+ContinuationDocs/
