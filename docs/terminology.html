@@ -1,0 +1,332 @@
+<meta charset="utf-8">
+<title>Trading Platform Terminology</title>
+<style>
+  @page { size: letter; margin: 18mm 16mm; }
+  body {
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    font-size: 10.2pt; line-height: 1.45; color: #16181d; margin: 0;
+  }
+  h1 { font-size: 22pt; margin: 0 0 2pt; letter-spacing: -0.4pt; }
+  .sub { color: #5a6472; font-size: 9.5pt; margin: 0 0 4pt; }
+  h2 {
+    font-size: 12pt; margin: 20pt 0 7pt; padding-bottom: 3pt;
+    border-bottom: 1.5px solid #16181d; page-break-after: avoid;
+  }
+  h2:first-of-type { margin-top: 14pt; }
+  dl { margin: 0; }
+  dt { font-weight: 700; margin-top: 9pt; page-break-after: avoid; }
+  dd { margin: 1pt 0 0; page-break-before: avoid; }
+  .why {
+    display: block; margin-top: 2pt; padding-left: 8pt;
+    border-left: 2px solid #c8ced8; color: #454d5a; font-size: 9.3pt;
+  }
+  .why b { color: #16181d; }
+  code {
+    font-family: "SF Mono", Menlo, monospace; font-size: 9pt;
+    background: #f0f2f5; padding: 0 3px; border-radius: 2px;
+  }
+  table.book {
+    border-collapse: collapse; margin: 7pt 0 3pt; font-size: 9pt;
+    font-family: "SF Mono", Menlo, monospace;
+  }
+  table.book td, table.book th {
+    padding: 2.5pt 9pt; border: 1px solid #ccd2dc; text-align: right;
+  }
+  table.book th { background: #f0f2f5; font-weight: 700; text-align: center; }
+  table.book td.lbl { text-align: left; color: #5a6472; }
+  .inside { background: #fff3d4; font-weight: 700; }
+  .note {
+    background: #f5f7fa; border-left: 3px solid #6b7686;
+    padding: 7pt 10pt; margin: 10pt 0; font-size: 9.4pt;
+  }
+  .avoid { page-break-inside: avoid; }
+</style>
+
+<h1>Trading Platform Terminology</h1>
+<p class="sub">Terms used in this codebase, defined for an engineer who has not traded.
+Each entry says what the word means and why it matters <em>here</em>, not in general.</p>
+
+<h2>The order book</h2>
+
+<div class="avoid">
+<p>Everything in the fast strand is about this one structure. A worked example, real
+prices from the GOOG data in <code>data/fixtures/</code>:</p>
+
+<table class="book">
+  <tr><th></th><th colspan="2">ASK (sellers)</th><th colspan="2">BID (buyers)</th></tr>
+  <tr class="inside"><td class="lbl">level 0</td><td>579.28</td><td>200</td><td>579.19</td><td>75</td></tr>
+  <tr><td class="lbl">level 1</td><td>579.35</td><td>100</td><td>579.12</td><td>100</td></tr>
+  <tr><td class="lbl">level 2</td><td>579.40</td><td>50</td><td>579.00</td><td>41</td></tr>
+  <tr><td class="lbl">level 3</td><td>579.55</td><td>300</td><td>578.99</td><td>1</td></tr>
+</table>
+<p class="sub">Highlighted row is the inside. Spread here is 579.28 − 579.19 = 9 cents.</p>
+</div>
+
+<dl>
+<dt>Order book</dt>
+<dd>Every resting offer to buy or sell, sorted by price. Not a database of trades.
+It is the set of intentions that have not traded yet.</dd>
+
+<dt>Bid / Ask</dt>
+<dd>Bid is what someone will pay. Ask (or offer) is what someone will sell for.
+Buyers rest on the bid side, sellers on the ask side.</dd>
+
+<dt>Level</dt>
+<dd>One occupied price. Level 0 is the best price on that side, level 1 the next
+price out. Levels are <em>occupied</em> prices, not ticks, so level 2 to level 3 may
+be one cent or fifty.
+<span class="why"><b>Here:</b> our LOBSTER files are "level 10" files, ten levels a side.
+That limit is why level 9 is the only one that ever disagrees.</span></dd>
+
+<dt>Inside / Top of book</dt>
+<dd>Level 0 on both sides. The best bid and the best ask.
+<span class="why"><b>Here:</b> the number that decides whether an execution simulation is
+honest. Most orders never touch anything deeper.</span></dd>
+
+<dt>Spread</dt>
+<dd>Ask minus bid. The price of demanding immediacy: buy at the ask and sell at the
+bid instantly, and you have lost the spread.
+<span class="why"><b>Here:</b> the central cost of the fast strand. Execution wins by
+avoiding it. Prediction must overcome it.</span></dd>
+
+<dt>Depth</dt>
+<dd>How much size rests at each level. A deep book absorbs large orders without
+moving; a thin one does not.</dd>
+
+<dt>Limit order / Market order</dt>
+<dd>A limit order names a price and waits. A market order takes whatever is
+available now. Limit orders build the book; market orders consume it.</dd>
+
+<dt>Passive / Aggressive</dt>
+<dd>Passive means resting in the book and waiting to be hit, which earns the spread.
+Aggressive means crossing it to trade now, which pays the spread.
+<span class="why"><b>Here:</b> the whole execution thesis. Passive fills turn a cost into a
+gain, but only if they actually fill.</span></dd>
+
+<dt>Queue position</dt>
+<dd>Orders at the same price fill in arrival order. Two traders posting the same
+price get very different outcomes depending on who arrived first.
+<span class="why"><b>Here:</b> the thing an order-level feed gives you and a price-level feed
+never can. <code>OrderBook::queue_ahead</code> returns an error rather than a guess on
+price-level data, because a strategy that thinks it knows its queue position when
+it does not will overestimate its own fill rate.</span></dd>
+
+<dt>Fill / Fill rate</dt>
+<dd>A fill is an order actually trading. Fill rate is the fraction of passive orders
+that fill rather than being cancelled unfilled.
+<span class="why"><b>Here:</b> the single unmeasured number the fast strand depends on. Gate F0
+forbids any profit claim until it is measured in paper trading. It cannot be
+measured from historical data, because that data does not contain your orders.</span></dd>
+
+<dt>Hidden (undisplayed) order</dt>
+<dd>Liquidity resting in the book that the feed does not show, usually priced
+inside the spread for price improvement.
+<span class="why"><b>Here:</b> LOBSTER message type 5. Applying these to the visible book is the
+classic reconstruction bug. We proved empirically that they never move the visible
+book: rows where LOBSTER's book does not move number 3,913 for GOOG, and GOOG has
+exactly 3,913 hidden executions.</span></dd>
+
+<dt>Crossed book</dt>
+<dd>Best bid at or above best ask, which is nonsense within one venue because those
+orders would have traded.
+<span class="why"><b>Here:</b> a bug detector. It caught the DeepReader ordering bug, and it
+caught the fact that continuous LOBSTER replay is impossible.</span></dd>
+
+<dt>MBO / MBP</dt>
+<dd>Market-by-order reports individual orders and their identities. Market-by-price
+reports only the total at each price. MBO costs money; MBP is often free.
+<span class="why"><b>Here:</b> LOBSTER is MBO, IEX DEEP is MBP. Only MBO can answer queue
+position, which is why the crate tracks which one it is holding.</span></dd>
+
+<dt>NBBO</dt>
+<dd>National Best Bid and Offer: the best price across all US venues, not one venue's
+own book.
+<span class="why"><b>Here:</b> spread capture must be measured against this. IEX alone is 2-3% of
+volume and quotes wider, so measuring against IEX would flatter every result. Our
+capture showed AAPL at 9 cents on IEX; that is not what a routed order pays.</span></dd>
+
+<dt>Halt</dt>
+<dd>Trading stopped, usually for volatility or pending news. Orders keep resting but
+do not trade, and prices commonly gap on resume.</dd>
+</dl>
+
+<h2>Execution quality</h2>
+<dl>
+<dt>Arrival price</dt>
+<dd>The price at the moment you decided to trade. The honest benchmark, because it
+is the last price not yet contaminated by your own trading.</dd>
+
+<dt>Implementation shortfall</dt>
+<dd>Difference between the price you decided at and the price you actually got,
+including fees and unfilled remainder.
+<span class="why"><b>Here:</b> the measure of the execution layer. Benchmarked against a naive
+market order placed at decision time.</span></dd>
+
+<dt>Slippage</dt>
+<dd>Informally, the same idea: the gap between expected and achieved price.</dd>
+
+<dt>Markout</dt>
+<dd>Where the price went after your fill, measured at fixed horizons such as 1s, 10s
+and 60s.
+<span class="why"><b>Here:</b> Gate F1 requires all three. Capturing two cents of spread and then
+watching the price move three cents against you is a loss dressed as a saving.</span></dd>
+
+<dt>Adverse selection</dt>
+<dd>The risk that whoever traded with you knew something you did not. Your passive
+orders fill precisely when someone wants the other side badly.
+<span class="why"><b>Here:</b> the reason passive execution is not free money, and what markout
+measures.</span></dd>
+
+<dt>Realized vs quoted spread</dt>
+<dd>Quoted is the spread on the screen. Realized is what you actually captured after
+the price moved against you. Realized is always the smaller number.</dd>
+
+<dt>Latency</dt>
+<dd>Delay between deciding and the exchange acknowledging. Reported as a
+distribution, never a single number, because the tail is when it matters.
+<span class="why"><b>Here:</b> a backtest that acts the instant a signal appears is fiction.
+Measured decision-to-submit time is applied as a delay in replay.</span></dd>
+
+<dt>Parent / child order</dt>
+<dd>A parent is what you want to trade. Children are the slices actually sent, to
+avoid moving the price with one large order.</dd>
+</dl>
+
+<h2>Statistics and research method</h2>
+<dl>
+<dt>Cross-sectional vs time-series</dt>
+<dd>Time-series asks "will AAPL go up," using its own history. Cross-sectional asks
+"of these thousands of stocks, which will beat the others."
+<span class="why"><b>Here:</b> this distinction defines the slow strand. Time-series prediction of
+a single asset is a well-documented dead end. Cross-sectional prediction works,
+modestly, which is the Gu, Kelly &amp; Xiu (2020) result.</span></dd>
+
+<dt>Sharpe ratio</dt>
+<dd>Return divided by volatility. Return per unit of risk. Higher is better; 1.0 is
+respectable, above 2 is rare and usually wrong.</dd>
+
+<dt>Deflated Sharpe Ratio (DSR)</dt>
+<dd>A <em>probability</em> between 0 and 1 that the edge is real rather than the luckiest of
+everything you tried. It is not a return figure.
+<span class="why"><b>Here:</b> non-negotiable rule 1. No raw Sharpe appears without it and without
+the trial count behind it.</span></dd>
+
+<dt>Trial count / multiple testing</dt>
+<dd>Test enough strategies and one looks brilliant by chance. The count of everything
+tried is what converts a Sharpe into an honest probability.
+<span class="why"><b>Here:</b> the append-only, hash-chained <code>trials/</code> log. A 100-point
+hyperparameter grid is 100 trials, not one.</span></dd>
+
+<dt>Lookahead bias</dt>
+<dd>Using information that was not available at the time. Usually accidental, via
+reindexing, forward-filling, or a careless date join.</dd>
+
+<dt>Point-in-time</dt>
+<dd>Data as it was known on the date in question, not as it was later corrected.</dd>
+
+<dt>As-reported vs restated</dt>
+<dd>As-reported is the number the company first published. Restated is the corrected
+version. Backtesting on restated numbers uses knowledge nobody had.
+<span class="why"><b>Here:</b> Sharadar dimension <code>ARQ</code>, never <code>MRQ</code>.</span></dd>
+
+<dt>Survivorship bias</dt>
+<dd>Studying only companies that still exist. The failures dropped out of the
+dataset, so returns look better than reality.</dd>
+
+<dt>Delisting return</dt>
+<dd>What you actually got when a holding stopped trading. Usually missing from
+vendor data, and usually very negative when the cause was failure.
+<span class="why"><b>Here:</b> imputed with published conventions, −30% NYSE/AMEX (Shumway 1997),
+−55% Nasdaq (Shumway &amp; Warther 1999), 0% for mergers with unknown terms.</span></dd>
+
+<dt>Factor</dt>
+<dd>A stock characteristic that has historically predicted relative returns, such as
+value, momentum, or quality.</dd>
+
+<dt>Book-to-market</dt>
+<dd>Accounting net worth divided by market price. High means the market values the
+company below its books. The classic value measure.</dd>
+
+<dt>Accruals</dt>
+<dd>The gap between reported profit and actual cash. Large accruals mean profit
+exists on paper more than in the bank, and predict weak future returns.</dd>
+
+<dt>Decile sort</dt>
+<dd>Rank all stocks on a characteristic, cut into ten equal buckets, compare the top
+bucket against the bottom. The standard way to show a factor works.</dd>
+
+<dt>Turnover</dt>
+<dd>How much of the portfolio is replaced each period. Every unit of turnover pays
+the spread, so turnover is the bridge between a signal and its cost.</dd>
+
+<dt>Baseline</dt>
+<dd>The dumb alternative your result must beat. Equal-weight buy-and-hold, random
+ranking at matched turnover, and a linear model on the same features.
+<span class="why"><b>Here:</b> rule 5. If gradient boosting does not beat ridge regression net of
+costs, that is a publishable finding, not a failure.</span></dd>
+</dl>
+
+<h2>Short selling</h2>
+<dl>
+<dt>Short</dt>
+<dd>Borrow a share, sell it, buy it back later. Profits if the price falls. Losses
+are unbounded, since the price can rise without limit.</dd>
+
+<dt>Borrow / Easy-to-borrow</dt>
+<dd>You must locate shares to borrow before shorting. Easy-to-borrow names are
+freely available at no fee; hard-to-borrow names cost, sometimes heavily.</dd>
+
+<dt>Short rebate</dt>
+<dd>Interest earned on the cash from the short sale. Institutions earn near the
+policy rate. Retail earns zero.
+<span class="why"><b>Here:</b> a 4-5% per year drag that is larger than typical borrow fees and
+routinely unmodelled. Rule 3 requires applying it.</span></dd>
+
+<dt>Buy-in</dt>
+<dd>The lender recalls the shares and you are forced to close, at whatever price the
+market offers.</dd>
+</dl>
+
+<h2>Data formats and plumbing</h2>
+<dl>
+<dt>Tick data</dt>
+<dd>Every individual event, quote change and trade, rather than daily summaries.
+Billions of rows a year.</dd>
+
+<dt>ITCH / DEEP</dt>
+<dd>Exchange feed protocols. Nasdaq TotalView-ITCH is order-level. IEX DEEP is
+price-level and free.</dd>
+
+<dt>LOBSTER</dt>
+<dd>An academic service that reconstructs order books from ITCH and publishes both
+the message stream and their own reconstructed book.
+<span class="why"><b>Here:</b> our correctness oracle. Feeding their messages to our book and
+diffing against their output is the one test that can catch a mistake we also made
+in our own test.</span></dd>
+
+<dt>pcapng</dt>
+<dd>A raw network packet capture format. Our IEX fixture is 13GB of it, gzipped, and
+is streamed rather than decompressed to disk.</dd>
+
+<dt>Parquet</dt>
+<dd>A columnar file format. Fast to read one column across millions of rows.
+<span class="why"><b>Here:</b> the only boundary between Rust and Python. Rust writes it, Python
+reads it, neither calls the other.</span></dd>
+
+<dt>DuckDB</dt>
+<dd>A SQL engine that queries Parquet files in place.
+<span class="why"><b>Here:</b> a query engine pointed at files, not a database to load into. There
+is no import step.</span></dd>
+</dl>
+
+<div class="note">
+<b>Two rules worth remembering, because they explain most decisions in this codebase.</b><br><br>
+<b>Rule 1.</b> No Sharpe ratio ever appears without its deflated counterpart and the
+trial count behind it. A Sharpe presented as performance with no trial count is a
+hard error, not a style violation.<br><br>
+<b>Rule 6.</b> No language model in the decision path. LLMs may write code, turn text
+into numeric features, and explain results already computed. They may not decide
+what to trade or forecast returns. A model reading "CEO resigns" has no idea what
+the market already priced, and will produce a confident directional call from
+information that does not contain the answer.
+</div>
