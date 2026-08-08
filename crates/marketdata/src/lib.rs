@@ -14,6 +14,7 @@
 pub mod book;
 pub mod event;
 pub mod iex;
+pub mod lobster;
 
 pub use book::{BookError, Granularity, OrderBook};
 pub use event::{
@@ -21,3 +22,6 @@ pub use event::{
     Qty, Side, TradingStatus, Venue,
 };
 pub use iex::{DeepReader, IexError, SymbolEvent};
+pub use lobster::{
+    HaltPhase, LobsterError, Message, MessageType, Reconstructor, RowOutcome, Snapshot, Validator,
+};

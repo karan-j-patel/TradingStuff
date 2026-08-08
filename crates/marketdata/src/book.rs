@@ -191,6 +191,63 @@ impl OrderBook {
         }
     }
 
+    /// Total size resting at one price, or `None` if no level exists there.
+    ///
+    /// Distinguishing "no level" from "zero size" matters, because a level is
+    /// removed when it empties rather than being kept at zero. Callers use this
+    /// to ask whether a price is one the book can see at all.
+    pub fn size_at(&self, side: Side, price: Price) -> Option<u64> {
+        self.side_map(side).get(&price).map(|level| level.total)
+    }
+
+    /// Discard every level beyond the best `depth` on each side, and the orders
+    /// composing them.
+    ///
+    /// # Why a book would ever throw away liquidity it knows about
+    ///
+    /// A depth-limited feed reports events only within the price range it
+    /// publishes. An order that rests inside that range, drifts outside it as
+    /// the market moves, and is then cancelled produces a cancellation the feed
+    /// never transmits, because by then the order is out of scope.
+    ///
+    /// A consumer that keeps such an order holds it forever. The stale orders
+    /// accumulate, and when the market moves back they reappear as liquidity
+    /// that no longer exists. Against a real LOBSTER session this produced a
+    /// crossed book on 91% of rows.
+    ///
+    /// So a consumer of a depth-limited feed must not maintain more state than
+    /// the feed maintains. Truncating to the published depth is not an
+    /// approximation, it is the correct model of what the feed actually tells
+    /// you. Feeds that publish full depth should never call this.
+    /// Returns the identities of orders that were dropped, so a caller that
+    /// tracks order lifecycle can tell "we discarded this on purpose" apart
+    /// from "we never knew about it". Those two cases look identical at the
+    /// point a later cancellation arrives, and conflating them turns a correct
+    /// depth policy into what looks like a reconstruction bug.
+    pub fn truncate(&mut self, depth: usize) -> Vec<OrderId> {
+        // Prices are collected before removal because the map cannot be
+        // mutated while it is being iterated. Both lists are short, being the
+        // tail past the published depth.
+        let stale_bids: Vec<Price> = self.bids.keys().rev().skip(depth).copied().collect();
+        let stale_asks: Vec<Price> = self.asks.keys().skip(depth).copied().collect();
+
+        let mut dropped = Vec::new();
+        for (side, prices) in [(Side::Bid, stale_bids), (Side::Ask, stale_asks)] {
+            for price in prices {
+                if let Some(level) = self.side_map_mut(side).remove(&price) {
+                    // Order identities go too. Leaving them in the id map would
+                    // let a later cancellation succeed against a level that is
+                    // no longer here, silently corrupting the totals.
+                    for order_id in level.queue {
+                        self.orders.remove(&order_id);
+                        dropped.push(order_id);
+                    }
+                }
+            }
+        }
+        dropped
+    }
+
     /// Total size resting ahead of `order_id` at its own price level.
     ///
     /// This is the number that decides whether a passive order fills. Available
@@ -528,6 +585,57 @@ mod tests {
             50,
             "order 1 now sits behind order 2"
         );
+    }
+
+    #[test]
+    fn truncating_keeps_the_best_levels_on_each_side() {
+        let mut book = book_with(&[
+            add(1, 1, Side::Bid, 100, 10),
+            add(2, 2, Side::Bid, 99, 20),
+            add(3, 3, Side::Bid, 98, 30),
+            add(4, 4, Side::Ask, 101, 40),
+            add(5, 5, Side::Ask, 102, 50),
+            add(6, 6, Side::Ask, 103, 60),
+        ]);
+        book.truncate(2);
+
+        assert_eq!(
+            book.depth(Side::Bid, 10),
+            vec![(px(100), 10), (px(99), 20)],
+            "the worst bid is dropped, not the best"
+        );
+        assert_eq!(
+            book.depth(Side::Ask, 10),
+            vec![(px(101), 40), (px(102), 50)],
+            "asks are best at the low end, so the high one goes"
+        );
+    }
+
+    #[test]
+    fn truncating_forgets_the_orders_too_not_just_the_levels() {
+        // Leaving an identity behind would let a later cancellation succeed
+        // against a level that is gone, and the totals would drift with no
+        // error raised.
+        let mut book = book_with(&[add(1, 1, Side::Bid, 100, 10), add(2, 2, Side::Bid, 99, 20)]);
+        book.truncate(1);
+
+        assert_eq!(
+            book.queue_ahead(2),
+            Err(BookError::UnknownOrder { order_id: 2 }),
+            "order 2 left with its level"
+        );
+        assert_eq!(
+            book.queue_ahead(1).expect("order 1 survived"),
+            0,
+            "the surviving order is untouched"
+        );
+    }
+
+    #[test]
+    fn truncating_a_shallow_book_changes_nothing() {
+        let mut book = book_with(&[add(1, 1, Side::Bid, 100, 10)]);
+        book.truncate(10);
+        assert_eq!(book.best_bid(), Some((px(100), 10)));
     }
 
     #[test]
