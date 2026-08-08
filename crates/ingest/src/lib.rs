@@ -19,7 +19,8 @@ pub mod provider;
 pub mod schema;
 
 pub use actions::{
-    ActionRecord, CorporateAction, Delisting, DelistingReason, DividendKind, unknown_return_count,
+    ActionRecord, Convention, CorporateAction, Delisting, DelistingReason, DividendKind, Listing,
+    TerminalValue, convention_for, imputed_count,
 };
 pub use adjust::{
     AdjustedPoint, AdjustedSeries, AdjustmentMode, UnexplainedStep, adjust, unexplained_steps,
