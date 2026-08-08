@@ -5,18 +5,30 @@
 //! implementations behind one interface, because the product ships
 //! bring-your-own-key and a buyer may hold neither.
 //!
+//! Prices are stored raw. Adjustment is computed here from explicit corporate
+//! action records rather than taken from a vendor, because "adjusted close"
+//! names several different numbers and vendors ship whichever they chose.
+//!
 //! Build order within this crate is sync before async: typed records,
 //! validation, and persistence are complete and tested against synthetic
 //! fixtures before any HTTP client exists.
 
+pub mod actions;
+pub mod adjust;
 pub mod provider;
 pub mod schema;
 
+pub use actions::{
+    ActionRecord, CorporateAction, Delisting, DelistingReason, DividendKind, unknown_return_count,
+};
+pub use adjust::{
+    AdjustedPoint, AdjustedSeries, AdjustmentMode, UnexplainedStep, adjust, unexplained_steps,
+};
 pub use provider::{
     DateRange, FilingKey, FundamentalRecord, FundamentalSource, PriceSource, ReportBasis,
     ReportScope, Revision, RevisionReport, SourceError, detect_revisions, visible_as_of,
 };
 pub use schema::{
-    AdjustmentJump, AssetKey, PermanentId, PriceBar, Reject, ValidationReport,
-    find_adjustment_jumps, validate_batch,
+    AssetKey, CloseKind, PermanentId, PriceBar, Reject, SessionScope, ValidationReport,
+    validate_batch,
 };

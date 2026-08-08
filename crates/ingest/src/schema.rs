@@ -15,7 +15,6 @@
 //! - `#[derive(...)]` writes boilerplate implementations at compile time. It is
 //!   closest to a class decorator, except it runs before the program exists.
 
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use jiff::civil::Date;
@@ -143,14 +142,46 @@ impl AssetKey {
 pub struct PriceBar {
     pub asset: AssetKey,
     pub date: Date,
+    /// Prices exactly as traded. There is deliberately no adjusted field here.
+    ///
+    /// "Adjusted close" names at least four different numbers and vendors ship
+    /// whichever they chose without saying which. Measured on one ETF for one
+    /// day, two vendors reported adjusted closes differing from each other and
+    /// from the correct value, because one reinvests dividends at a price
+    /// nobody could transact at. Adjustment is computed in `crate::adjust`
+    /// from raw prices plus explicit corporate action records.
     pub open: Decimal,
     pub high: Decimal,
     pub low: Decimal,
     pub close: Decimal,
-    /// Close adjusted for splits and dividends. Research uses this; execution
-    /// uses the raw `close`. Conflating them is a classic source of fake alpha.
-    pub close_adj: Decimal,
     pub volume: Decimal,
+    /// Which trading session this bar covers. Vendors differ: some roll up
+    /// regular hours only, others run midnight to midnight and include
+    /// eligible extended-hours trades, which inflates volume relative to a
+    /// regular-hours bar for the same day.
+    pub session: SessionScope,
+    /// What `close` actually is. The official closing auction price and the
+    /// consolidated tape's last trade are different numbers, and some vendors
+    /// use an after-hours print as the close.
+    pub close_kind: CloseKind,
+}
+
+/// Which part of the trading day a bar aggregates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SessionScope {
+    /// 09:30 to 16:00 Eastern only.
+    RegularHours,
+    /// Midnight to midnight, including eligible pre- and post-market trades.
+    IncludingExtended,
+}
+
+/// Which price the `close` field holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CloseKind {
+    /// The official closing auction price. What an index or a benchmark uses.
+    ClosingAuction,
+    /// The last trade on the consolidated tape, which may be after hours.
+    LastTrade,
 }
 
 /// Why a row was rejected.
@@ -203,7 +234,6 @@ impl PriceBar {
             ("high", self.high),
             ("low", self.low),
             ("close", self.close),
-            ("close_adj", self.close_adj),
         ] {
             if value <= Decimal::ZERO {
                 return Err(Reject::NonPositivePrice { field, value });
@@ -275,87 +305,6 @@ pub fn validate_batch(bars: impl IntoIterator<Item = PriceBar>) -> ValidationRep
     report
 }
 
-/// A day where the split/dividend adjustment factor moved unexpectedly.
-///
-/// Not an error on its own — a real split produces exactly this signature. It
-/// becomes an error only when no corporate action explains it, which is a
-/// judgement this crate cannot make until an actions table exists.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AdjustmentJump {
-    pub asset: AssetKey,
-    pub date: Date,
-    pub previous_factor: Decimal,
-    pub factor: Decimal,
-    /// factor / previous_factor. A 2:1 split shows roughly 0.5 or 2.0
-    /// depending on adjustment direction.
-    pub ratio: Decimal,
-}
-
-/// Flag days where `close_adj / close` moved more than `tolerance`.
-///
-/// Per-row validation cannot catch a corrupted adjusted close. A row with
-/// `close = 10` and `close_adj = 1000` is individually plausible — deeply split
-/// stocks legitimately have adjustment factors spanning orders of magnitude, so
-/// no fixed bound separates "heavily adjusted" from "vendor error".
-///
-/// What *is* detectable is discontinuity. The factor should hold steady between
-/// corporate actions and step exactly once when one occurs. An unexplained step
-/// is either a real action or vendor corruption, and both deserve a human
-/// glance before the data reaches a return series.
-///
-/// `bars` may contain any mix of assets and any ordering. Grouping and sorting
-/// happen here rather than being a documented precondition, because a
-/// precondition a caller can violate silently is not a safeguard. A mixed batch
-/// compared as one series would diff one company's adjustment factor against
-/// another's and report fake splits, which is worse than no check at all —
-/// operators learn to ignore an alarm that cries wolf.
-pub fn find_adjustment_jumps(bars: &[PriceBar], tolerance: Decimal) -> Vec<AdjustmentJump> {
-    let mut by_asset: HashMap<&AssetKey, Vec<&PriceBar>> = HashMap::new();
-    for bar in bars {
-        by_asset.entry(&bar.asset).or_default().push(bar);
-    }
-
-    let mut jumps = Vec::new();
-    for series in by_asset.values_mut() {
-        series.sort_by_key(|bar| bar.date);
-
-        let mut previous: Option<Decimal> = None;
-        for bar in series.iter() {
-            if bar.close <= Decimal::ZERO {
-                continue; // already rejected by validate(); nothing to compare
-            }
-            let factor = bar.close_adj / bar.close;
-
-            if let Some(prior_factor) = previous
-                && prior_factor > Decimal::ZERO
-            {
-                let ratio = factor / prior_factor;
-                if (ratio - Decimal::ONE).abs() > tolerance {
-                    jumps.push(AdjustmentJump {
-                        asset: bar.asset.clone(),
-                        date: bar.date,
-                        previous_factor: prior_factor,
-                        factor,
-                        ratio,
-                    });
-                }
-            }
-            previous = Some(factor);
-        }
-    }
-
-    // HashMap iteration order is randomised per process, so sort for a stable
-    // result. A check whose output reorders between runs is unusable in a diff
-    // or a regression test.
-    jumps.sort_by(|a, b| {
-        a.asset
-            .ticker
-            .cmp(&b.asset.ticker)
-            .then(a.date.cmp(&b.date))
-    });
-    jumps
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,8 +321,9 @@ mod tests {
             high: d(high),
             low: d(low),
             close: d(close),
-            close_adj: d(close),
             volume: d(volume),
+            session: SessionScope::RegularHours,
+            close_kind: CloseKind::ClosingAuction,
         }
     }
 
@@ -514,126 +464,4 @@ mod tests {
     }
 
     // --- adjustment continuity ------------------------------------------
-
-    fn bar_with_adj(day: i8, close: f64, close_adj: f64) -> PriceBar {
-        let d = |v: f64| Decimal::from_f64(v).expect("test literal is representable");
-        PriceBar {
-            asset: AssetKey::ticker_only("TEST"),
-            date: Date::new(2020, 1, day).expect("valid date"),
-            open: d(close),
-            high: d(close),
-            low: d(close),
-            close: d(close),
-            close_adj: d(close_adj),
-            volume: d(1_000.0),
-        }
-    }
-
-    #[test]
-    fn a_stable_adjustment_factor_produces_no_jumps() {
-        let tol = Decimal::from_f64(0.01).expect("representable");
-        let series = [
-            bar_with_adj(1, 100.0, 50.0),
-            bar_with_adj(2, 102.0, 51.0),
-            bar_with_adj(3, 104.0, 52.0),
-        ];
-        assert!(find_adjustment_jumps(&series, tol).is_empty());
-    }
-
-    #[test]
-    fn a_corrupted_adjusted_close_is_flagged() {
-        // The reviewer's scenario: raw OHLC is sane, close_adj is nonsense.
-        // Individually this row passes validate(); only continuity catches it.
-        let tol = Decimal::from_f64(0.01).expect("representable");
-        let series = [
-            bar_with_adj(1, 10.0, 5.0),
-            bar_with_adj(2, 10.0, 1000.0), // factor 0.5 -> 100.0
-            bar_with_adj(3, 10.0, 5.0),
-        ];
-        let jumps = find_adjustment_jumps(&series, tol);
-        assert_eq!(jumps.len(), 2, "one jump into the bad row, one back out");
-        assert_eq!(jumps[0].date, Date::new(2020, 1, 2).expect("valid"));
-
-        // And confirm the corrupt row really does pass per-row validation,
-        // which is exactly why this batch-level check has to exist.
-        assert_eq!(series[1].validate(), Ok(()));
-    }
-
-    #[test]
-    fn unsorted_input_is_sorted_before_comparison() {
-        let tol = Decimal::from_f64(0.01).expect("representable");
-        let ordered = [
-            bar_with_adj(1, 100.0, 50.0),
-            bar_with_adj(2, 100.0, 50.0),
-            bar_with_adj(3, 100.0, 50.0),
-        ];
-        let shuffled = [
-            bar_with_adj(3, 100.0, 50.0),
-            bar_with_adj(1, 100.0, 50.0),
-            bar_with_adj(2, 100.0, 50.0),
-        ];
-        assert_eq!(
-            find_adjustment_jumps(&ordered, tol),
-            find_adjustment_jumps(&shuffled, tol)
-        );
-    }
-
-    /// Round 2 of review caught this: a mixed batch was compared as one series,
-    /// diffing one company's adjustment factor against another's.
-    #[test]
-    fn a_mixed_batch_does_not_produce_cross_asset_false_positives() {
-        let tol = Decimal::from_f64(0.01).expect("representable");
-        let mut alpha = bar_with_adj(1, 100.0, 50.0); // factor 0.5
-        let mut beta = bar_with_adj(2, 100.0, 10.0); // factor 0.1, different company
-        alpha.asset = AssetKey::ticker_only("ALPHA");
-        beta.asset = AssetKey::ticker_only("BETA");
-
-        let mut alpha2 = bar_with_adj(3, 100.0, 50.0);
-        alpha2.asset = AssetKey::ticker_only("ALPHA");
-
-        // Interleaved by date, which is what a real multi-asset batch looks like.
-        let jumps = find_adjustment_jumps(&[alpha, beta, alpha2], tol);
-        assert!(
-            jumps.is_empty(),
-            "each asset's factor is stable within itself; only cross-asset \
-             comparison would report a jump"
-        );
-    }
-
-    #[test]
-    fn output_order_is_stable_across_runs() {
-        // HashMap iteration is randomised per process, so an unsorted result
-        // would reorder between runs and be useless in a diff or a snapshot test.
-        let tol = Decimal::from_f64(0.01).expect("representable");
-        let mut batch = Vec::new();
-        for (ticker, adj) in [("ZETA", 1000.0), ("ALPHA", 1000.0), ("MU", 1000.0)] {
-            let mut first = bar_with_adj(1, 10.0, 5.0);
-            let mut second = bar_with_adj(2, 10.0, adj);
-            first.asset = AssetKey::ticker_only(ticker);
-            second.asset = AssetKey::ticker_only(ticker);
-            batch.push(first);
-            batch.push(second);
-        }
-        let tickers: Vec<String> = find_adjustment_jumps(&batch, tol)
-            .iter()
-            .map(|jump| jump.asset.ticker.clone())
-            .collect();
-        assert_eq!(
-            tickers,
-            vec!["ALPHA", "MU", "ZETA"],
-            "sorted by ticker then date"
-        );
-    }
-
-    #[test]
-    fn a_two_for_one_split_is_reported_for_a_human_to_confirm() {
-        // A genuine split has the same signature as corruption. The function
-        // reports rather than judges; only an actions table can tell them apart.
-        let tol = Decimal::from_f64(0.01).expect("representable");
-        let series = [bar_with_adj(1, 100.0, 100.0), bar_with_adj(2, 50.0, 50.0)];
-        assert!(
-            find_adjustment_jumps(&series, tol).is_empty(),
-            "ratio unchanged"
-        );
-    }
 }
