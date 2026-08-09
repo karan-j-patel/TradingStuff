@@ -55,7 +55,8 @@ enum Command {
     Backtest {
         #[arg(long, default_value = rigor::DEFAULT_PATH, help = TRIAL_LOG_HELP)]
         trials: String,
-        /// Research program this trial belongs to, which scopes its N
+        /// Research program this trial belongs to, which scopes its N. ASCII
+        /// letters, digits, and - _ . only, at most 64 characters
         #[arg(long)]
         program: String,
         /// The strategy configuration, hashed into the log. Free text for now,

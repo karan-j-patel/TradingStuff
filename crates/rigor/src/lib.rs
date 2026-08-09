@@ -43,7 +43,7 @@ pub mod error;
 pub mod log;
 pub mod threshold;
 
-pub use entry::{TrialEntry, ZERO_HASH, hash_bytes};
+pub use entry::{ConfigHash, TrialEntry, ZERO_HASH, hash_bytes};
 pub use error::TrialError;
 pub use log::{DEFAULT_PATH, TrialLog};
 pub use threshold::{expected_max_sharpe, sigma_sr, threshold_for};

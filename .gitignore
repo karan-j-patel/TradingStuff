@@ -35,3 +35,4 @@ ContinuationDocs/
 
 # Generated from docs/terminology.html. Regenerate rather than commit.
 docs/*.pdf
+.claude/

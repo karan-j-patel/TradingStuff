@@ -18,7 +18,7 @@
 use std::process::ExitCode;
 
 use anyhow::Context as _;
-use rigor::{TrialLog, hash_bytes};
+use rigor::{ConfigHash, TrialLog};
 
 pub fn run(trials_path: &str, program: &str, config: &str) -> anyhow::Result<ExitCode> {
     let mut log = TrialLog::load(trials_path)
@@ -26,7 +26,9 @@ pub fn run(trials_path: &str, program: &str, config: &str) -> anyhow::Result<Exi
 
     // `append` verifies the existing chain before writing, so a broken log
     // stops this here rather than growing a longer broken log.
-    let config_hash = hash_bytes(config.as_bytes());
+    // `ConfigHash` is the only thing `append` accepts, so the configuration
+    // cannot reach the field named for its hash unhashed. See `rigor::ConfigHash`.
+    let config_hash = ConfigHash::of(config.as_bytes());
     let entry = log
         .append(program, &config_hash, None)
         .context("recording the trial before running anything")?;
@@ -112,6 +114,34 @@ mod tests {
         assert_eq!(log.lifetime_count(), 2);
         assert_eq!(log.count_for("prog"), 2);
         log.verify().expect("two appends leave a verifying chain");
+    }
+
+    /// A program name outside the documented charset is refused, and refusing
+    /// it leaves the log exactly as it was.
+    ///
+    /// The second half is the part worth testing. A boundary check that rejects
+    /// after writing something is not a boundary check.
+    #[test]
+    fn a_non_ascii_program_is_refused_and_writes_nothing() {
+        let path = temp_log("nonascii");
+        let before = fs::read_to_string(&path).expect("read");
+
+        let error = run(&path, "\u{3bc}structure-v1", "some=config")
+            .expect_err("a non-ASCII program must be refused");
+
+        // `{:#}` prints the whole chain of causes, which is what the binary
+        // prints, so this asserts on what a person would actually see.
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("\u{3bc}structure-v1"),
+            "the error must name the value it rejected, got {message}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read"),
+            before,
+            "a refused trial changed the log"
+        );
     }
 
     /// Different configurations must hash differently, or the log would record

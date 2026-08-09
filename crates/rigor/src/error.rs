@@ -71,6 +71,31 @@ pub enum TrialError {
         #[source]
         source: serde_json::Error,
     },
+
+    /// A research program identifier was rejected at the boundary. See
+    /// [`crate::entry::validate_program`] for the rule and for why it is a
+    /// restriction rather than an escaping problem to be handled.
+    #[error("research program {program:?} is not a usable identifier, {reason}")]
+    InvalidProgram { program: String, reason: String },
+
+    /// A `config_hash` was rejected at the boundary. See
+    /// [`crate::entry::ConfigHash`] for why a writer may only record a real
+    /// hash while a reader may load whatever the file holds.
+    #[error("{value:?} is not a usable config_hash, {reason}")]
+    InvalidConfigHash { value: String, reason: String },
+
+    /// The path stopped naming the file the append had locked, part way
+    /// through the append. See [`crate::log::TrialLog::append`] for the
+    /// sequence and `crate::log` for what replaces a file underneath a running
+    /// process.
+    ///
+    /// This is an operator-level event rather than something to retry around.
+    /// `CLAUDE.md` makes halting the default response to uncertainty, and after
+    /// a replacement nothing in this process knows which file holds what.
+    #[error(
+        "the trial log at {path} was replaced while a trial was being appended, so the write went to a file that path no longer names and the trial must be treated as unrecorded"
+    )]
+    Replaced { path: PathBuf },
 }
 
 impl TrialError {
@@ -84,7 +109,12 @@ impl TrialError {
             TrialError::Malformed { line, .. }
             | TrialError::HashMismatch { line, .. }
             | TrialError::BrokenLink { line, .. } => Some(*line),
-            TrialError::Io { .. } | TrialError::Empty { .. } | TrialError::Canonical { .. } => None,
+            TrialError::Io { .. }
+            | TrialError::Empty { .. }
+            | TrialError::Canonical { .. }
+            | TrialError::InvalidProgram { .. }
+            | TrialError::InvalidConfigHash { .. }
+            | TrialError::Replaced { .. } => None,
         }
     }
 }

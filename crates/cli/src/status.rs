@@ -12,7 +12,10 @@ use rigor::{TrialLog, threshold};
 use crate::gates::{Checkability, GATES, GateItem};
 
 pub fn run(trials_path: &str, program: Option<&str>) -> anyhow::Result<ExitCode> {
-    let log = TrialLog::load(trials_path)
+    // Read under a shared lock, so this never reports a chain or an `N` taken
+    // from a file that some other process is in the middle of appending to.
+    // `TrialLog::load_shared_locked` is honest about how narrow that window is.
+    let log = TrialLog::load_shared_locked(trials_path)
         .with_context(|| format!("loading the trial log from {trials_path}"))?;
 
     println!("Trial log: {}", log.path().display());
