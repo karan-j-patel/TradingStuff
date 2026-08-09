@@ -15,15 +15,20 @@
 
 pub mod actions;
 pub mod adjust;
+pub mod parquet;
 pub mod provider;
 pub mod schema;
 
 pub use actions::{
-    ActionRecord, Convention, CorporateAction, Delisting, DelistingReason, DividendKind, Listing,
-    TerminalValue, convention_for, imputed_count,
+    ActionRecord, Convention, CorporateAction, Delisting, DelistingReason, DelistingReject,
+    DividendKind, Listing, TerminalValue, convention_for, imputed_count, validate_delisting,
 };
 pub use adjust::{
     AdjustedPoint, AdjustedSeries, AdjustmentMode, UnexplainedStep, adjust, unexplained_steps,
+};
+pub use parquet::{
+    CurateError, DEFAULT_DATA_ROOT, data_root, delistings_path, prices_path, read_delistings,
+    read_prices, write_delistings, write_prices,
 };
 pub use provider::{
     DateRange, FilingKey, FundamentalRecord, FundamentalSource, PriceSource, ReportBasis,

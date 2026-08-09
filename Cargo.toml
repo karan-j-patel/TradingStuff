@@ -10,6 +10,12 @@ license = "MIT"
 # Refresh with `cargo update` plus a bump here rather than letting these drift.
 [workspace.dependencies]
 anyhow = "1.0.104"
+# Arrow and Parquet move in lockstep and share a major, so they are pinned
+# together. `duckdb` is deliberately absent from this stack: it pins arrow ^58,
+# two arrow majors do not unify, and DuckDB is SQL-only here by standing rule.
+# parquet's default features already include zstd, so no extra flag is needed.
+arrow = "59.2.0"
+parquet = "59.2.0"
 clap = { version = "4.6.6", features = ["derive"] }
 jiff = { version = "0.2.35", features = ["serde"] }
 # `maths` supplies `sqrt` and `checked_ln` on Decimal. The trial-count threshold

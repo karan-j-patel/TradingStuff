@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+arrow.workspace = true
 jiff = { workspace = true, features = ["serde"] }
+parquet.workspace = true
 rust_decimal.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true

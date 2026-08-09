@@ -4,17 +4,19 @@
 //! so that it holds whether or not anyone goes through the CLI. In particular
 //! the trial chain belongs to `rigor` and none of its logic is repeated here.
 //!
-//! Three commands today.
+//! Four commands today.
 //!
 //! - `status` reports what the trial log says and what the gates permit.
 //! - `backtest` records a trial, then admits there is no engine to run.
 //! - `ingest` reports which data providers this machine is configured for.
+//! - `curate` writes validated records to Parquet, and counts no trial for it.
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
 mod backtest;
+mod curate;
 mod gates;
 mod ingest;
 mod status;
@@ -67,6 +69,14 @@ enum Command {
 
     /// Report which data providers this machine is configured for
     Ingest,
+
+    /// Write validated records to a curated Parquet file
+    ///
+    /// Curation is not a backtest, so nothing here touches the trial counter.
+    Curate {
+        #[command(subcommand)]
+        dataset: curate::Dataset,
+    },
 }
 
 fn main() -> ExitCode {
@@ -80,6 +90,7 @@ fn main() -> ExitCode {
             config,
         } => backtest::run(&trials, &program, &config),
         Command::Ingest => ingest::run(),
+        Command::Curate { dataset } => curate::run(&dataset),
     };
 
     match outcome {

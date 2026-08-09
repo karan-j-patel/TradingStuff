@@ -1,0 +1,265 @@
+//! Curated Parquet files: the on-disk form of validated records.
+//!
+//! Rust writes these files and Python reads them. That is the whole boundary
+//! between the two languages in this project, and neither side calls the other.
+//!
+//! # Why not DuckDB
+//!
+//! DuckDB is SQL-only here by standing rule, and no `RecordBatch` ever crosses
+//! between the two stacks. The `duckdb` crate pins `arrow ^58` while this module
+//! is built on `arrow 59`, and two arrow majors do not unify, so a dependency on
+//! both would not resolve. That is a symptom rather than the reason. The reason
+//! is that one Arrow stack with one owner is auditable and two are not.
+//!
+//! # Why the reader is strict
+//!
+//! Curated files are written and read by this codebase on both sides. There is
+//! no third party to be lenient towards, so a file that violates an invariant
+//! means a bug in this crate, and the reader says so loudly.
+//!
+//! This is deliberately the opposite of the trial log, whose readers are lenient
+//! because that file has to stay reportable even when it has been damaged. The
+//! difference is what each file is for. A damaged trial log must still testify
+//! about the trials it can still read. A damaged curated file has no such duty,
+//! and reading it as though it were fine would put wrong numbers into a result.
+//!
+//! # Identity on disk
+//!
+//! Three columns, shared by every curated dataset: `ticker`,
+//! `permanent_id_kind`, and `permanent_id`. See [`codec::Identity`] for why
+//! identity is not flattened into a single string.
+
+use std::collections::HashSet;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use jiff::civil::Date;
+
+mod codec;
+mod delistings;
+mod enums;
+mod error;
+mod prices;
+
+#[cfg(test)]
+mod tests;
+
+pub use delistings::{read_delistings, write_delistings};
+pub use error::CurateError;
+pub use prices::{read_prices, write_prices};
+
+use crate::schema::AssetKey;
+use codec::{Identity, describe, encode_identity};
+
+/// Where curated data lives when nothing says otherwise.
+pub const DEFAULT_DATA_ROOT: &str = "data";
+
+/// Resolve the data root: the flag, then `DATA_ROOT`, then the default.
+///
+/// The flag wins so a test or a one-off run can point somewhere harmless
+/// without touching the operator's environment.
+pub fn data_root(flag: Option<&str>) -> PathBuf {
+    if let Some(path) = flag {
+        return PathBuf::from(path);
+    }
+    match std::env::var_os("DATA_ROOT") {
+        // An empty `DATA_ROOT` is a sourced but unfilled `.env.example`, which
+        // means unset rather than "write to the current directory".
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => PathBuf::from(DEFAULT_DATA_ROOT),
+    }
+}
+
+// One file per dataset.
+//
+// Known ceiling: partition by year when file size demands it. The reader
+// already iterates record batches, so the upgrade is a directory of yearly
+// files behind these same two functions rather than a change to any caller.
+
+pub fn prices_path(data_root: &Path) -> PathBuf {
+    data_root.join("curated/prices/prices.parquet")
+}
+
+pub fn delistings_path(data_root: &Path) -> PathBuf {
+    data_root.join("curated/delistings/delistings.parquet")
+}
+
+/// How many rejected records to name before the message stops being useful.
+const REPORTED_REJECTS: usize = 5;
+
+/// Build the error a batch failing domain validation is refused with.
+///
+/// Shared by both writers so neither can report less than the other. The label
+/// closure is the only per-dataset part, since a `PriceBar` and a `Delisting`
+/// name themselves differently.
+pub(crate) fn invalid_records<T, E: std::fmt::Display>(
+    dataset: &'static str,
+    total: usize,
+    rejected: &[(T, E)],
+    label: impl Fn(&T) -> String,
+) -> CurateError {
+    let mut detail = String::new();
+    for (record, reason) in rejected.iter().take(REPORTED_REJECTS) {
+        detail.push_str(&format!("\n  {}: {reason}", label(record)));
+    }
+    if rejected.len() > REPORTED_REJECTS {
+        detail.push_str(&format!(
+            "\n  and {} more",
+            rejected.len() - REPORTED_REJECTS
+        ));
+    }
+    CurateError::InvalidRecords {
+        dataset,
+        total,
+        rejected: rejected.len(),
+        detail,
+    }
+}
+
+/// Reject an empty or duplicated batch, then put it in a deterministic order.
+///
+/// Shared by both datasets so the three rules land once rather than per caller.
+/// `key_of` extracts the identity and date from whatever row type is passed,
+/// which is the only thing the two datasets have in common.
+///
+/// # Lookahead safety
+///
+/// Sorting reorders whole rows and moves no information across time. Every
+/// field travels with the row it belongs to, so no value observed on a later
+/// date can reach an earlier one. Rows are never merged, split, or filled.
+pub(crate) fn prepare<T>(
+    dataset: &'static str,
+    rows: Vec<T>,
+    key_of: impl Fn(&T) -> (&AssetKey, Date),
+) -> Result<Vec<(Identity, T)>, CurateError> {
+    if rows.is_empty() {
+        return Err(CurateError::EmptyDataset { dataset });
+    }
+
+    // Duplicate detection uses `AssetKey`'s own equality, not the ticker. Two
+    // rows carrying the same permanent id under different tickers are the same
+    // security, and a check keyed on the ticker string would miss exactly that
+    // case, which is the one worth catching.
+    let mut seen: HashSet<(AssetKey, Date)> = HashSet::with_capacity(rows.len());
+    for row in &rows {
+        let (asset, date) = key_of(row);
+        if !seen.insert((asset.clone(), date)) {
+            return Err(CurateError::DuplicateRow {
+                dataset,
+                asset: describe(asset),
+                date,
+            });
+        }
+    }
+
+    let mut decorated: Vec<(Identity, T)> = rows
+        .into_iter()
+        .map(|row| {
+            // The borrow of `row` ends before the move into the tuple, which is
+            // why this needs its own block.
+            let identity = {
+                let (asset, _) = key_of(&row);
+                encode_identity(asset)
+            };
+            (identity, row)
+        })
+        .collect();
+
+    decorated.sort_by(|a, b| {
+        let left = sort_key(&a.0, key_of(&a.1).1);
+        let right = sort_key(&b.0, key_of(&b.1).1);
+        left.cmp(&right)
+    });
+
+    Ok(decorated)
+}
+
+/// The total order rows are written in: identity kind with nulls last, then the
+/// identifier, then the ticker, then the date.
+///
+/// The leading `bool` is the nulls-last rule. `false` sorts before `true`, so
+/// rows carrying a permanent id come first and unidentified rows land at the
+/// end. Within the unidentified group the two identity columns are both `None`
+/// and contribute nothing, so ticker and date decide.
+fn sort_key(identity: &Identity, date: Date) -> (bool, Option<&str>, Option<&str>, &str, Date) {
+    (
+        identity.kind.is_none(),
+        identity.kind,
+        identity.id.as_deref(),
+        &identity.ticker,
+        date,
+    )
+}
+
+/// Distinguishes concurrent temp files within one process. Paired with the pid
+/// it makes a name no other writer will pick.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Write through a temp file in the destination directory, then rename over the
+/// final name.
+///
+/// A rename within one directory is atomic, so a reader sees either the old
+/// file or the new one and never a half-written one. The temp file has to be in
+/// the same directory for that to hold, since a rename across filesystems is a
+/// copy. The sync happens before the rename so the bytes are durable before the
+/// name that publishes them exists.
+///
+/// A failure removes the temp file and reports the original error, because the
+/// cleanup failing is not the thing the caller needs to hear about.
+pub(crate) fn write_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> Result<(), CurateError>,
+) -> Result<(), CurateError> {
+    let directory = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(directory)
+        .map_err(|e| CurateError::io(format!("creating {}", directory.display()), e))?;
+
+    let stem = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "curated".to_owned());
+    let unique = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp = directory.join(format!(".{stem}.{}.{unique}.tmp", std::process::id()));
+
+    let result = (|| {
+        let mut file = File::create(&temp)
+            .map_err(|e| CurateError::io(format!("creating {}", temp.display()), e))?;
+        write(&mut file)?;
+        file.sync_all()
+            .map_err(|e| CurateError::io(format!("syncing {}", temp.display()), e))
+    })();
+
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+
+    fs::rename(&temp, path).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        CurateError::io(
+            format!("renaming {} over {}", temp.display(), path.display()),
+            e,
+        )
+    })
+}
+
+/// The fixed writer settings every curated file uses.
+///
+/// Fixed rather than configurable because a knob here changes bytes on disk for
+/// no gain a caller could reason about. zstd is the best ratio of the codecs
+/// parquet ships by default, and statistics let a reader skip row groups.
+pub(crate) fn writer_properties() -> ::parquet::file::properties::WriterProperties {
+    use ::parquet::basic::{Compression, ZstdLevel};
+    use ::parquet::file::properties::{EnabledStatistics, WriterProperties};
+
+    WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .set_statistics_enabled(EnabledStatistics::Chunk)
+        .build()
+}
+
+/// Open a curated file for reading, naming it if that fails.
+pub(crate) fn open(path: &Path) -> Result<File, CurateError> {
+    File::open(path).map_err(|e| CurateError::io(format!("opening {}", path.display()), e))
+}
