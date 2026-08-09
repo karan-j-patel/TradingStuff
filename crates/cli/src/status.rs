@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use rigor::{TrialLog, threshold};
 
-use crate::gates::{Checkability, GATE_ONE, GATE_TWO, GateItem};
+use crate::gates::{Checkability, GATES, GateItem};
 
 pub fn run(trials_path: &str, program: Option<&str>) -> anyhow::Result<ExitCode> {
     let log = TrialLog::load(trials_path)
@@ -146,34 +146,53 @@ fn report_one_threshold(label: &str, sharpes: &[rust_decimal::Decimal], trials: 
     }
 }
 
-/// Gate progress, in three groups so nothing implies progress it does not have.
+/// Every criterion in `DECISION_CRITERIA.md`, grouped by gate.
+///
+/// All of them, not a selection. A gate list that shows fewer criteria than the
+/// document holds reads as a shorter path to trading than there is, and
+/// `crates/cli/src/gates.rs` carries a test that fails the build if the two
+/// ever fall out of step.
 fn report_gates(chain_ok: bool) {
-    println!("Gate 1, before any paper trading");
+    println!("Gates");
     println!("  DECISION_CRITERIA.md governs. This is a reading of it, not the thing itself.");
+    println!("  [ -- ] is not an unticked box. It means the question cannot be asked yet, and");
+    println!("  the line below each one says why.");
 
-    for item in GATE_ONE {
-        print_gate_item(item, chain_ok);
+    for gate in GATES {
+        println!();
+        println!("{}", gate.heading);
+        for item in gate.items {
+            print_gate_item(item, chain_ok);
+        }
     }
 
+    let automated = GATES
+        .iter()
+        .flat_map(|gate| gate.items)
+        .filter(|item| item.checkability == Checkability::Automated)
+        .count();
+    let total: usize = GATES.iter().map(|gate| gate.items.len()).sum();
     println!();
-    println!("Gate 2, before one dollar of real money");
-    print_gate_item(&GATE_TWO, chain_ok);
+    println!("  {automated} of {total} criteria are machine-checkable today.");
 }
 
 fn print_gate_item(item: &GateItem, chain_ok: bool) {
     match item.checkability {
-        // The one automated item in Gate 1 is the chain, so its verdict is the
-        // chain's verdict. A second automated item would need its own check
-        // rather than this one reused.
-        Checkability::Automated if chain_ok => println!("  [pass]  {}", item.description),
-        Checkability::Automated => println!("  [FAIL]  {}", item.description),
+        // The one automated item is the chain, so its verdict is the chain's
+        // verdict. A second automated item would need its own check rather than
+        // this one reused, which is why the verdict is not threaded in as a
+        // per-item closure. There is nothing yet to thread.
+        Checkability::Automated if chain_ok => {
+            println!("  [pass]  {:<6}{}", item.id, item.summary);
+        }
+        Checkability::Automated => println!("  [FAIL]  {:<6}{}", item.id, item.summary),
         Checkability::BlockedOnCode(reason) => {
-            println!("  [ -- ]  {}", item.description);
-            println!("          not checkable yet, {reason}");
+            println!("  [ -- ]  {:<6}{}", item.id, item.summary);
+            println!("                not checkable yet, {reason}");
         }
         Checkability::NeedsHuman(reason) => {
-            println!("  [ -- ]  {}", item.description);
-            println!("          not machine-checkable, {reason}");
+            println!("  [ -- ]  {:<6}{}", item.id, item.summary);
+            println!("                not machine-checkable, {reason}");
         }
     }
 }

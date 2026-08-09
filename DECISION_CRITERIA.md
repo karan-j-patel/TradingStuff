@@ -31,16 +31,16 @@ doing its job.
 
 All must hold:
 
-- [ ] The lookahead test suite passes, **and** a deliberately-broken version of
+- [ ] `[G1.1]` The lookahead test suite passes, **and** a deliberately-broken version of
       the pipeline fails it. A suite that never fails is decorative.
-- [ ] A known published factor (quality + value composite) reproduces within a
+- [ ] `[G1.2]` A known published factor (quality + value composite) reproduces within a
       defensible range of published net-of-cost figures, or the discrepancy is
       understood and written down.
-- [ ] Random noise fed in as the signal produces an unimpressive deflated
+- [ ] `[G1.3]` Random noise fed in as the signal produces an unimpressive deflated
       Sharpe. If noise looks good, the harness is broken.
-- [ ] The cost model is applied to every result. No gross-return path exists.
-- [ ] The trial log hash chain verifies.
-- [ ] Corporate actions (splits, dividends, delistings, ticker changes) are
+- [ ] `[G1.4]` The cost model is applied to every result. No gross-return path exists.
+- [ ] `[G1.5]` The trial log hash chain verifies.
+- [ ] `[G1.6]` Corporate actions (splits, dividends, delistings, ticker changes) are
       handled and tested. A delisting mid-hold must not silently vanish.
 
 ## Gate 2. Before one dollar of real money
@@ -49,15 +49,15 @@ All of Gate 1, plus all of the following:
 
 | Criterion | Threshold |
 |---|---|
-| Paper trading duration | ≥ **126 trading days** (~6 months), uninterrupted |
-| Deflated Sharpe, scoped | ≥ **0.95** |
-| Deflated Sharpe, lifetime | ≥ **0.90** |
-| Beats equal-weight buy-and-hold, net of costs | required |
-| Beats random ranking at matched turnover | required |
-| Beats ridge regression on the same features | required |
-| Live vs backtest monthly return correlation | ≥ **0.50** |
-| Realized paper Sharpe vs backtest Sharpe | ≥ **50%** of backtest |
-| Missed or degraded rebalances during paper period | **0** |
+| `[G2.1]` Paper trading duration | ≥ **126 trading days** (~6 months), uninterrupted |
+| `[G2.2]` Deflated Sharpe, scoped | ≥ **0.95** |
+| `[G2.3]` Deflated Sharpe, lifetime | ≥ **0.90** |
+| `[G2.4]` Beats equal-weight buy-and-hold, net of costs | required |
+| `[G2.5]` Beats random ranking at matched turnover | required |
+| `[G2.6]` Beats ridge regression on the same features | required |
+| `[G2.7]` Live vs backtest monthly return correlation | ≥ **0.50** |
+| `[G2.8]` Realized paper Sharpe vs backtest Sharpe | ≥ **50%** of backtest |
+| `[G2.9]` Missed or degraded rebalances during paper period | **0** |
 
 > **Deflated Sharpe** is a probability between 0 and 1. It is the chance the strategy's
 > edge is real rather than the luckiest of everything tried. 0.95 means 95%
@@ -88,7 +88,7 @@ would let the easy win launder the hard one.
 No number describing what this strand might earn may be stated, written down, or
 used in any decision until all of these hold.
 
-- [ ] **Aggregate one-step top-N reconstruction** is validated against the
+- [ ] `[F0.1]` **Aggregate one-step top-N reconstruction** is validated against the
       LOBSTER orderbook files. Applying one message to a known-correct book
       must reproduce the aggregate size at every price the reference reports,
       top **10 levels** per side, across **all five** sample symbols, with the
@@ -107,7 +107,7 @@ used in any decision until all of these hold.
       and a right markout, it produces wrong numbers throughout while every
       other box on this list still ticks.
 
-- [ ] It is written down that **queue position cannot be validated from LOBSTER
+- [ ] `[F0.2]` It is written down that **queue position cannot be validated from LOBSTER
       at all**, and that this is why the fill-rate rule below exists.
 
       An orderbook row carries no order identities. It reports how much rests
@@ -131,29 +131,29 @@ used in any decision until all of these hold.
       substitute a backtested estimate, is proposing to substitute a number
       that nothing has ever checked.
 
-- [ ] Passive fill rate is **measured**, not assumed. Reported as fills over
+- [ ] `[F0.3]` Passive fill rate is **measured**, not assumed. Reported as fills over
       attempts, with the count, over at least **20 trading days** of paper
       trading.
-- [ ] It is written down that this cannot be measured from the IEX or LOBSTER
+- [ ] `[F0.4]` It is written down that this cannot be measured from the IEX or LOBSTER
       captures, because neither contains our orders. A backtest can say where
       our order would have rested. It cannot say whether it would have filled.
-- [ ] Decision-to-acknowledgement latency is measured and reported as a
+- [ ] `[F0.5]` Decision-to-acknowledgement latency is measured and reported as a
       distribution, median and p95 and p99. A point estimate hides the tail,
       and the tail is when it matters.
 
-- [ ] The **latency horizon** is fixed here, at the measured p99, and written
+- [ ] `[F0.6]` The **latency horizon** is fixed here, at the measured p99, and written
       down. Gate F1 tests against that recorded number and not against a fresh
       one. A horizon re-derived later would move to wherever the strategy
       needed it to be.
 
-- [ ] **Sigma of daily profit and loss** is measured across the same 20 days
+- [ ] `[F0.7]` **Sigma of daily profit and loss** is measured across the same 20 days
       and written down. The loss caps below use it, and it is fixed at this
       point. It is never re-estimated from live trading, because a strategy
       that starts losing more would otherwise widen its own cap exactly when
       the cap is doing its job.
-- [ ] Quoted spread at decision time is recorded per order, so realized capture
+- [ ] `[F0.8]` Quoted spread at decision time is recorded per order, so realized capture
       can be compared against it rather than assumed equal to it.
-- [ ] **No strategy-facing API accepts `MarketEvent`. All decision paths take
+- [ ] `[F0.9]` **No strategy-facing API accepts `MarketEvent`. All decision paths take
       `Observed`.**
 
       `Observed` exposes when we learned of an event and deliberately has no
@@ -168,7 +168,7 @@ used in any decision until all of these hold.
       `crates/execution` is written. It is a gate item so that it is checked
       rather than remembered.
 
-- [ ] Every microstructure hypothesis is in the trial counter, including every
+- [ ] `[F0.10]` Every microstructure hypothesis is in the trial counter, including every
       point of every hyperparameter grid.
 
 ## Gate F1. Before the execution layer routes one real order
@@ -177,13 +177,13 @@ Execution is judged against the cost of not having it.
 
 | Criterion | Threshold |
 |---|---|
-| Parent orders measured in paper trading | ≥ **200** |
-| Implementation shortfall vs naive market order at decision time | better on the mean **and** on ≥ **60%** of parent orders |
-| Markouts at **1s, 10s and 60s** after every passive fill | all three reported, none omitted |
-| Mean markout at 60s after a passive fill | must not exceed the spread captured on that fill |
-| Realized spread capture, measured against the **NBBO** at decision time | reported per order |
-| Latency p99, signal to acknowledgement | at or below the horizon recorded at Gate F0 |
-| Fills the reconciliation could not match to an order | **0** |
+| `[F1.1]` Parent orders measured in paper trading | ≥ **200** |
+| `[F1.2]` Implementation shortfall vs naive market order at decision time | better on the mean **and** on ≥ **60%** of parent orders |
+| `[F1.3]` Markouts at **1s, 10s and 60s** after every passive fill | all three reported, none omitted |
+| `[F1.4]` Mean markout at 60s after a passive fill | must not exceed the spread captured on that fill |
+| `[F1.5]` Realized spread capture, measured against the **NBBO** at decision time | reported per order |
+| `[F1.6]` Latency p99, signal to acknowledgement | at or below the horizon recorded at Gate F0 |
+| `[F1.7]` Fills the reconciliation could not match to an order | **0** |
 
 > Spread capture is measured against the national best bid and offer, never
 > against one venue's own book. IEX alone is roughly two to three percent of
@@ -202,14 +202,14 @@ All of Gate F1, plus all of the following.
 
 | Criterion | Threshold |
 |---|---|
-| Paper trading duration | ≥ **60 trading days**, uninterrupted |
-| Round trips completed in paper | ≥ **2,000** |
-| Deflated Sharpe, scoped | ≥ **0.95** |
-| Deflated Sharpe, lifetime | ≥ **0.90** |
-| Beats the execution layer alone, running a null signal, net of costs | required |
-| Beats random entry at matched turnover and holding period | required |
-| Beats **logistic regression on order book imbalance**, same features, net of costs | required |
-| Realized spread capture vs quoted spread | reported, and the gap explained |
+| `[F2.1]` Paper trading duration | ≥ **60 trading days**, uninterrupted |
+| `[F2.2]` Round trips completed in paper | ≥ **2,000** |
+| `[F2.3]` Deflated Sharpe, scoped | ≥ **0.95** |
+| `[F2.4]` Deflated Sharpe, lifetime | ≥ **0.90** |
+| `[F2.5]` Beats the execution layer alone, running a null signal, net of costs | required |
+| `[F2.6]` Beats random entry at matched turnover and holding period | required |
+| `[F2.7]` Beats **logistic regression on order book imbalance**, same features, net of costs | required |
+| `[F2.8]` Realized spread capture vs quoted spread | reported, and the gap explained |
 
 Calendar time alone is a weak gate at this frequency, which is why round trips
 are required alongside it. Sixty days of an idle strategy proves nothing.

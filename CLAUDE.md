@@ -46,6 +46,32 @@ seen to fail.
 The same applies to an external reviewer. Its findings are evaluated, and
 rejecting one with a technical reason is as valid an outcome as applying it.
 
+### A green suite is silent about properties nobody wrote down
+
+Passing tests say the written tests pass. They say nothing about a guarantee no
+test covers, and that absence looks identical to coverage from the outside.
+
+Before trusting a guarantee, name the mutation that would break it and confirm a
+test fails on that mutation. If none does, the guarantee is a comment.
+
+Two ways this goes wrong, both seen here:
+
+The mutation does not discriminate. Reordering the fields of the trial entry
+struct changed nothing, because the canonical form is built through a sorted
+map, so the experiment confirmed the code was already immune rather than showing
+the test could fail. The useful mutation was breaking the sort, which failed
+three tests. When a mutation comes back green, find the one that discriminates
+rather than recording the test as verified.
+
+The bypass does not compile. Renaming a method to something that does not exist
+produces a compile error, not a test failure, and proves nothing. A real bypass
+compiles, so the demonstration has to compile too. An early return ahead of the
+guarded call is the realistic shape.
+
+Tests written to cover a bug just fixed deserve this most, since they were
+written by someone who already knew the answer. Two tests here passed **because**
+of the bug they were meant to catch, and so defended it on every run.
+
 ## The distinction that defines the slow strand
 
 Time-series prediction of a single asset does not work. Forecasting tomorrow's
