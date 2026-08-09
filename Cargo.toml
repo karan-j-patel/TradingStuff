@@ -9,7 +9,14 @@ license = "MIT"
 # Versions pinned to the latest resolved from crates.io on 2026-08-07.
 # Refresh with `cargo update` plus a bump here rather than letting these drift.
 [workspace.dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
 jiff = { version = "0.2.35", features = ["serde"] }
-rust_decimal = { version = "1.42.1", features = ["serde-with-str"] }
+# `maths` supplies `sqrt` and `checked_ln` on Decimal. The trial-count threshold
+# needs both and the alternative was routing them through f64, which this
+# project does not do for numbers that decide anything.
+rust_decimal = { version = "1.42.1", features = ["maths", "serde-with-str"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
 thiserror = "2.0.19"
