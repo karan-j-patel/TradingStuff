@@ -30,6 +30,22 @@ public. Flipping visibility must require no cleanup.
 - Prose style for anything committed: no em dashes, no mid-sentence colons in
   prose, one idea per bullet, plain register.
 
+### Delegated work is re-derived, not read
+
+Numeric claims from a subagent are checked before they are used. Run the
+command again, or reproduce the number a different way.
+
+A report that never arrives is not evidence of failure, and a report that
+arrives is not evidence of correctness. Both of the most valuable findings in
+this project came from checking a number by hand rather than reading a summary
+of it. One was a census showing that every removal in a validation harness took
+a fallback path, so the code the harness appeared to test was never exercised.
+The other was a compile-fail test that was passing without ever having been
+seen to fail.
+
+The same applies to an external reviewer. Its findings are evaluated, and
+rejecting one with a technical reason is as valid an outcome as applying it.
+
 ## The distinction that defines the slow strand
 
 Time-series prediction of a single asset does not work. Forecasting tomorrow's

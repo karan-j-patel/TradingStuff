@@ -153,6 +153,21 @@ used in any decision until all of these hold.
       the cap is doing its job.
 - [ ] Quoted spread at decision time is recorded per order, so realized capture
       can be compared against it rather than assumed equal to it.
+- [ ] **No strategy-facing API accepts `MarketEvent`. All decision paths take
+      `Observed`.**
+
+      `Observed` exposes when we learned of an event and deliberately has no
+      accessor for when it happened at the venue. Reading venue time in a
+      decision path is lookahead, and it is the quiet kind: it compiles, it
+      runs, it produces plausible numbers, and no test fails.
+
+      The type makes that unreadable for anyone holding an `Observed`. It
+      cannot make anyone hold one, because reconstruction legitimately needs
+      raw events and venue ordering. So the other half is a convention, and a
+      convention written only in a code comment will not survive to the day
+      `crates/execution` is written. It is a gate item so that it is checked
+      rather than remembered.
+
 - [ ] Every microstructure hypothesis is in the trial counter, including every
       point of every hyperparameter grid.
 
@@ -273,6 +288,10 @@ result existed. Tightening takes effect immediately, so none of it waited.
   aggregate one-step top-N reconstruction, after an adversarial review found
   the claim was being stated as "the reconstructor is correct". Standard
   recorded as 2,110,855 messages with zero mismatches.
+- **2026-08-08.** Added the `Observed` rule to F0. A type can stop a decision
+  path reading venue time, but it cannot force a decision path to use that
+  type, and the convention that closes the gap would otherwise live only in a
+  code comment.
 - **2026-08-08.** Added the queue-position finding to F0. It cannot be
   validated from LOBSTER at all, since an orderbook row carries no order
   identities, and it is the entire economics of a passive fill. Recorded as
