@@ -8,7 +8,7 @@
 //! mapping. Nothing here touches arrow, a file, or a row.
 
 use super::error::CurateError;
-use crate::actions::{Convention, DelistingReason, Listing};
+use crate::actions::{Convention, DelistingReason, DividendKind, Listing};
 use crate::schema::{CloseKind, SessionScope};
 
 pub(crate) fn session_str(value: SessionScope) -> &'static str {
@@ -107,6 +107,26 @@ pub(crate) fn convention_from(
         "shumway_warther_1999_nasdaq" => Ok(Convention::ShumwayWarther1999Nasdaq),
         "crsp_merger_unknown" => Ok(Convention::CrspMergerUnknown),
         other => Err(unknown(dataset, "imputation_convention", other)),
+    }
+}
+
+pub(crate) fn dividend_kind_str(value: DividendKind) -> &'static str {
+    match value {
+        DividendKind::Cash => "cash",
+        DividendKind::Stock => "stock",
+        DividendKind::Special => "special",
+    }
+}
+
+pub(crate) fn dividend_kind_from(
+    dataset: &'static str,
+    value: &str,
+) -> Result<DividendKind, CurateError> {
+    match value {
+        "cash" => Ok(DividendKind::Cash),
+        "stock" => Ok(DividendKind::Stock),
+        "special" => Ok(DividendKind::Special),
+        other => Err(unknown(dataset, "dividend_kind", other)),
     }
 }
 

@@ -10,6 +10,7 @@
 //! - `backtest` records a trial, then admits there is no engine to run.
 //! - `ingest` reports which data providers this machine is configured for.
 //! - `curate` writes validated records to Parquet, and counts no trial for it.
+//!   Three datasets: prices, delistings, and corporate actions.
 
 use std::process::ExitCode;
 

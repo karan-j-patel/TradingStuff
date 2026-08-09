@@ -20,11 +20,16 @@ pub enum CurateError {
     #[error("{dataset} has no rows, and writing a zero-row file would destroy the previous one")]
     EmptyDataset { dataset: &'static str },
 
-    #[error("{dataset} holds two rows for {asset} on {date}, which is never deduplicated silently")]
+    #[error(
+        "{dataset} holds two rows for {asset} on {date}{qualifier}, which is never deduplicated silently"
+    )]
     DuplicateRow {
         dataset: &'static str,
         asset: String,
         date: Date,
+        /// Names the rest of the key for datasets where (asset, date) is not
+        /// all of it. Empty for prices and delistings.
+        qualifier: String,
     },
 
     /// Every Decimal column is stored at scale 9. A value needing more is a
@@ -98,6 +103,19 @@ pub enum CurateError {
         dataset: &'static str,
         total: usize,
         rejected: usize,
+        detail: String,
+    },
+
+    /// A corporate action row whose payload columns disagree with its kind.
+    ///
+    /// Each kind owns exactly one payload, so a split carrying a dividend kind
+    /// or a dividend with no kind means the row was assembled from two
+    /// different events. Reading it as either one would invent a fact.
+    #[error("{dataset} row {row} is a {kind}, but {detail}")]
+    ActionInvariant {
+        dataset: &'static str,
+        row: usize,
+        kind: String,
         detail: String,
     },
 

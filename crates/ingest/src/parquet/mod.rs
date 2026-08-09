@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use jiff::civil::Date;
 
+mod actions;
 mod codec;
 mod delistings;
 mod enums;
@@ -45,6 +46,7 @@ mod prices;
 #[cfg(test)]
 mod tests;
 
+pub use actions::{read_actions, write_actions};
 pub use delistings::{read_delistings, write_delistings};
 pub use error::CurateError;
 pub use prices::{read_prices, write_prices};
@@ -83,6 +85,10 @@ pub fn prices_path(data_root: &Path) -> PathBuf {
 
 pub fn delistings_path(data_root: &Path) -> PathBuf {
     data_root.join("curated/delistings/delistings.parquet")
+}
+
+pub fn actions_path(data_root: &Path) -> PathBuf {
+    data_root.join("curated/actions/actions.parquet")
 }
 
 /// How many rejected records to name before the message stops being useful.
@@ -131,7 +137,7 @@ pub(crate) fn invalid_records<T, E: std::fmt::Display>(
 pub(crate) fn prepare<T>(
     dataset: &'static str,
     rows: Vec<T>,
-    key_of: impl Fn(&T) -> (&AssetKey, Date),
+    key_of: impl Fn(&T) -> RowKey<'_>,
 ) -> Result<Vec<(Identity, T)>, CurateError> {
     if rows.is_empty() {
         return Err(CurateError::EmptyDataset { dataset });
@@ -141,14 +147,16 @@ pub(crate) fn prepare<T>(
     // rows carrying the same permanent id under different tickers are the same
     // security, and a check keyed on the ticker string would miss exactly that
     // case, which is the one worth catching.
-    let mut seen: HashSet<(AssetKey, Date)> = HashSet::with_capacity(rows.len());
+    let mut seen: HashSet<(AssetKey, Date, Option<&'static str>, Option<&'static str>)> =
+        HashSet::with_capacity(rows.len());
     for row in &rows {
-        let (asset, date) = key_of(row);
-        if !seen.insert((asset.clone(), date)) {
+        let key = key_of(row);
+        if !seen.insert((key.asset.clone(), key.date, key.kind, key.subkind)) {
             return Err(CurateError::DuplicateRow {
                 dataset,
-                asset: describe(asset),
-                date,
+                asset: describe(key.asset),
+                date: key.date,
+                qualifier: key.qualifier(),
             });
         }
     }
@@ -158,37 +166,84 @@ pub(crate) fn prepare<T>(
         .map(|row| {
             // The borrow of `row` ends before the move into the tuple, which is
             // why this needs its own block.
-            let identity = {
-                let (asset, _) = key_of(&row);
-                encode_identity(asset)
-            };
+            let identity = encode_identity(key_of(&row).asset);
             (identity, row)
         })
         .collect();
 
     decorated.sort_by(|a, b| {
-        let left = sort_key(&a.0, key_of(&a.1).1);
-        let right = sort_key(&b.0, key_of(&b.1).1);
+        let left = sort_key(&a.0, &key_of(&a.1));
+        let right = sort_key(&b.0, &key_of(&b.1));
         left.cmp(&right)
     });
 
     Ok(decorated)
 }
 
+/// What makes a row unique, and what decides where it is written.
+///
+/// Prices and delistings are keyed on (asset, date) alone. Corporate actions
+/// are not: a regular cash dividend and a special dividend on the same
+/// ex-date are two real records, so the kind and the dividend kind are part of
+/// the key rather than evidence of a duplicate.
+pub(crate) struct RowKey<'a> {
+    pub asset: &'a AssetKey,
+    pub date: Date,
+    pub kind: Option<&'static str>,
+    pub subkind: Option<&'static str>,
+}
+
+impl<'a> RowKey<'a> {
+    /// For datasets where (asset, date) is the whole key.
+    pub fn simple(asset: &'a AssetKey, date: Date) -> Self {
+        Self {
+            asset,
+            date,
+            kind: None,
+            subkind: None,
+        }
+    }
+
+    /// The discriminating part of the key, for an error that has to name it.
+    fn qualifier(&self) -> String {
+        match (self.kind, self.subkind) {
+            (None, _) => String::new(),
+            (Some(kind), None) => format!(" ({kind})"),
+            (Some(kind), Some(sub)) => format!(" ({kind} {sub})"),
+        }
+    }
+}
+
 /// The total order rows are written in: identity kind with nulls last, then the
-/// identifier, then the ticker, then the date.
+/// identifier, the ticker, the date, and finally the per-dataset discriminators.
 ///
 /// The leading `bool` is the nulls-last rule. `false` sorts before `true`, so
 /// rows carrying a permanent id come first and unidentified rows land at the
 /// end. Within the unidentified group the two identity columns are both `None`
-/// and contribute nothing, so ticker and date decide.
-fn sort_key(identity: &Identity, date: Date) -> (bool, Option<&str>, Option<&str>, &str, Date) {
+/// and contribute nothing, so ticker and date decide. The trailing terms are
+/// `None` for datasets that do not use them, where they likewise contribute
+/// nothing.
+type SortKey<'a> = (
+    bool,
+    Option<&'a str>,
+    Option<&'a str>,
+    &'a str,
+    Date,
+    Option<&'static str>,
+    bool,
+    Option<&'static str>,
+);
+
+fn sort_key<'a>(identity: &'a Identity, key: &RowKey<'_>) -> SortKey<'a> {
     (
         identity.kind.is_none(),
         identity.kind,
         identity.id.as_deref(),
         &identity.ticker,
-        date,
+        key.date,
+        key.kind,
+        key.subkind.is_none(),
+        key.subkind,
     )
 }
 

@@ -61,7 +61,9 @@ pub fn write_prices(bars: Vec<PriceBar>, path: &Path) -> Result<usize, CurateErr
         ));
     }
 
-    let rows = super::prepare(DATASET, report.accepted, |bar| (&bar.asset, bar.date))?;
+    let rows = super::prepare(DATASET, report.accepted, |bar| {
+        super::RowKey::simple(&bar.asset, bar.date)
+    })?;
     let count = rows.len();
 
     let mut ticker = Vec::with_capacity(count);

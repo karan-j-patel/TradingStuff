@@ -64,7 +64,9 @@ pub fn write_delistings(rows: Vec<Delisting>, path: &Path) -> Result<usize, Cura
         }));
     }
 
-    let rows = super::prepare(DATASET, rows, |row| (&row.asset, row.date))?;
+    let rows = super::prepare(DATASET, rows, |row| {
+        super::RowKey::simple(&row.asset, row.date)
+    })?;
     let count = rows.len();
 
     let mut ticker = Vec::with_capacity(count);
