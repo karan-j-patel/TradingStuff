@@ -15,6 +15,7 @@ pub mod book;
 pub mod event;
 pub mod iex;
 pub mod lobster;
+pub mod replay;
 
 pub use book::{BookError, Granularity, OrderBook};
 pub use event::{
@@ -25,3 +26,4 @@ pub use iex::{DeepReader, IexError, SymbolEvent};
 pub use lobster::{
     HaltPhase, LobsterError, Message, MessageType, Reconstructor, RowOutcome, Snapshot, Validator,
 };
+pub use replay::{DecisionReplay, LatencyStats, LatencySummary, Observed, Replay, ReplayError};
