@@ -146,6 +146,7 @@ fn sep_row(close: &str, close_unadjusted: &str) -> Vec<(&'static str, String)> {
         ("high", r#""10.90""#.to_string()),
         ("low", r#""9.90""#.to_string()),
         ("close", close.to_string()),
+        ("volume", r#""1000""#.to_string()),
         ("closeunadj", close_unadjusted.to_string()),
         ("lastupdated", r#""2020-01-03""#.to_string()),
     ]
@@ -625,8 +626,8 @@ fn s6_four_consecutive_429s_surface_transport() {
     assert!(matches!(error, SourceError::Transport { .. }));
     assert_eq!(
         transport.calls(),
-        3,
-        "the client should make exactly three attempts"
+        2,
+        "one attempt, one wait, one more, then fail"
     );
 }
 

@@ -61,15 +61,16 @@ use super::decode::{date_of, decimal_of, text_of, token_of};
 use super::sep::SepRow;
 use super::tickers::TickerRow;
 use super::{MAX_PAGES, malformed, refused};
-use crate::provider::SourceError;
-use crate::schema::{AssetKey, PermanentId};
+use crate::adjusted::AdjustedBar;
+use crate::provider::{AdjustedPriceSource, DateRange, SourceError};
+use crate::schema::{AssetKey, CloseKind, PermanentId, SessionScope};
 
 /// The fields the ticker lookup asks for.
 const TICKER_FIELDS: &str =
     "table,permaticker,ticker,name,exchange,category,isdelisted,firstpricedate,lastpricedate";
 
 /// The fields the price probe asks for.
-const PRICE_FIELDS: &str = "ticker,date,open,high,low,close,closeunadj,lastupdated";
+const PRICE_FIELDS: &str = "ticker,date,open,high,low,close,volume,closeunadj,lastupdated";
 
 // --- the envelope -----------------------------------------------------------
 
@@ -176,7 +177,7 @@ impl SharadarClient {
         let mut boundary: Option<Map<String, Value>> = None;
 
         for _ in 0..MAX_PAGES {
-            let page = self.native_page(table, params, sort, skip)?;
+            let page = self.native_page(table, params, sort, skip, self.page_size())?;
             let returned = page.len();
             let mut rows = page.iter();
 
@@ -235,10 +236,11 @@ impl SharadarClient {
         params: &[(&str, String)],
         sort: &str,
         skip: usize,
+        limit: usize,
     ) -> Result<Vec<Map<String, Value>>, SourceError> {
         let mut all: Vec<(&str, String)> = params.to_vec();
         all.push(("sort", sort.to_string()));
-        all.push(("limit", self.page_size().to_string()));
+        all.push(("limit", limit.to_string()));
         if skip > 0 {
             all.push(("skip", skip.to_string()));
         }
@@ -345,19 +347,24 @@ impl SharadarClient {
 
     /// The earliest date this key is served for one ticker.
     ///
+    /// One request, `limit=1` ascending, rather than a paginated walk. The
+    /// answer is the first row, and fetching a whole history to look at its
+    /// head would be thousands of round trips against a host that publishes no
+    /// rate limits.
+    ///
     /// The free tier is a rolling window, and `tickers.firstpricedate` reports
     /// the full history rather than the part the key can see, so the two
-    /// disagree and only this one is actionable. Measured rather than assumed,
-    /// which is what [`crate::provider::PriceSource::earliest_available`]
-    /// exists to carry.
+    /// disagree and only this one is actionable.
     pub fn native_earliest_date(&self, ticker: &str) -> Result<Option<Date>, SourceError> {
         check_query_safe("ticker", ticker)?;
         let params = [
             ("ticker", ticker.to_string()),
             ("fields", "ticker,date,close".to_string()),
         ];
-        let rows = self.fetch_native(native_tables::STOCKS, &params, "date", decode_price_date)?;
-        Ok(rows.into_iter().next())
+        let page = self.native_page(native_tables::STOCKS, &params, "date", 0, 1)?;
+        page.first()
+            .map(|row| NativeRow { fields: row }.date("date"))
+            .transpose()
     }
 
     /// Filing dates from the fundamentals table.
@@ -433,11 +440,75 @@ fn decode_price(row: &NativeRow<'_>) -> Result<SepRow, SourceError> {
         high: row.decimal("high")?,
         low: row.decimal("low")?,
         close: row.decimal("close")?,
+        volume: row.decimal("volume")?,
         close_unadjusted: row.decimal("closeunadj")?,
         last_updated: row.optional_date("lastupdated")?,
     })
 }
 
-fn decode_price_date(row: &NativeRow<'_>) -> Result<Date, SourceError> {
-    row.date("date")
+// --- the provider trait implementation --------------------------------------
+
+/// The security used to measure where the key's window starts.
+///
+/// It has to be one whose listing comfortably predates any plausible window,
+/// or the measurement returns that security's first trading day instead of the
+/// subscription's limit and the boundary comes out too late. Microsoft has
+/// traded since 1986, which is early enough that anything measured here is the
+/// key talking rather than the company.
+const WINDOW_PROBE_TICKER: &str = "MSFT";
+
+impl AdjustedPriceSource for SharadarClient {
+    fn name(&self) -> &str {
+        super::PROVIDER
+    }
+
+    fn earliest_available(&self) -> Result<Option<Date>, SourceError> {
+        self.measured_earliest(WINDOW_PROBE_TICKER)
+    }
+
+    fn fetch_adjusted(
+        &self,
+        assets: &[AssetKey],
+        range: DateRange,
+    ) -> Result<Vec<AdjustedBar>, SourceError> {
+        // The boundary is checked before any data is fetched, so an
+        // out-of-window request costs one measurement rather than a partial
+        // series the caller then has to notice is short.
+        if let Some(earliest) = self.earliest_available()?
+            && range.start() < earliest
+        {
+            return Err(refused(format!(
+                "the range starts {} but this key serves nothing before {earliest}. \
+                 The window is measured, not taken from vendor metadata, which \
+                 reports a first price date years earlier than the key honours. \
+                 Nothing here shortens a range quietly",
+                range.start()
+            )));
+        }
+
+        let mut bars = Vec::new();
+        for asset in assets {
+            // Serial, one ticker at a time. This host publishes no rate limits.
+            for row in self.native_price_window(&asset.ticker, range.start(), range.end())? {
+                bars.push(AdjustedBar {
+                    // The caller's key, not one rebuilt from the ticker string,
+                    // so a permanent id supplied by the caller survives.
+                    asset: asset.clone(),
+                    date: row.date,
+                    open: row.open,
+                    high: row.high,
+                    low: row.low,
+                    close: row.close,
+                    volume: row.volume,
+                    close_unadjusted: row.close_unadjusted,
+                    // The vendor documents `close` as "the official exchange
+                    // close price", which is the closing auction rather than a
+                    // last trade, and its daily bars are regular-hours.
+                    session: SessionScope::RegularHours,
+                    close_kind: CloseKind::ClosingAuction,
+                });
+            }
+        }
+        Ok(bars)
+    }
 }

@@ -12,7 +12,8 @@ use rust_decimal::Decimal;
 
 use super::*;
 use crate::actions::{Convention, Delisting, DelistingReason, Listing, TerminalValue};
-use crate::schema::{AssetKey, CloseKind, PermanentId, PriceBar, SessionScope};
+use crate::adjusted::AdjustedBar;
+use crate::schema::{AssetKey, CloseKind, PermanentId, SessionScope};
 
 /// The refusals and the reader's strictness checks. Split out only for size;
 /// they share the fixtures above.
@@ -49,8 +50,12 @@ fn sharadar(ticker: &str, id: u64) -> AssetKey {
     }
 }
 
-fn bar(asset: AssetKey, date: Date, price: Decimal) -> PriceBar {
-    PriceBar {
+/// `close_unadjusted` is deliberately not equal to `close`: four times it, as
+/// after a 4-for-1 split. A helper that made every price column the same value
+/// would let the writer or reader swap two of them and every round-trip
+/// assertion would still pass.
+fn bar(asset: AssetKey, date: Date, price: Decimal) -> AdjustedBar {
+    AdjustedBar {
         asset,
         date,
         open: price,
@@ -58,6 +63,7 @@ fn bar(asset: AssetKey, date: Date, price: Decimal) -> PriceBar {
         low: price,
         close: price,
         volume: dec("1000"),
+        close_unadjusted: price * dec("4"),
         session: SessionScope::RegularHours,
         close_kind: CloseKind::ClosingAuction,
     }
@@ -106,7 +112,7 @@ fn t1_prices_round_trip_and_keep_identified_and_unidentified_keys_apart() {
         identified.clone(),
         other_namespace.clone(),
     ];
-    assert_eq!(write_prices(input, &path).expect("write"), 3);
+    assert_eq!(write_prices(input, &path, "synthetic").expect("write"), 3);
 
     let read = read_prices(&path).expect("read");
     assert_eq!(read.len(), 3, "every row must come back");
@@ -226,7 +232,7 @@ fn t3_decimals_round_trip_exactly_at_every_scale_up_to_nine() {
         "123456789.123456789",
     ];
 
-    let input: Vec<PriceBar> = values
+    let input: Vec<AdjustedBar> = values
         .iter()
         .enumerate()
         .map(|(index, text)| {
@@ -239,7 +245,7 @@ fn t3_decimals_round_trip_exactly_at_every_scale_up_to_nine() {
         .collect();
 
     assert_eq!(
-        write_prices(input.clone(), &path).expect("write"),
+        write_prices(input.clone(), &path, "synthetic").expect("write"),
         values.len()
     );
     let read = read_prices(&path).expect("read");
@@ -280,7 +286,8 @@ fn t3_a_scale_twelve_value_is_refused_and_named() {
     too_precise.low = dec("9.00");
     too_precise.close = dec("10.000000000001");
 
-    let error = write_prices(vec![too_precise], &path).expect_err("a scale-12 value must refuse");
+    let error = write_prices(vec![too_precise], &path, "synthetic")
+        .expect_err("a scale-12 value must refuse");
     assert!(
         matches!(error, CurateError::InexactDecimal { .. }),
         "must fail on the decimal codec rather than on validation: {error:?}"
@@ -311,7 +318,129 @@ fn t3_trailing_zeros_beyond_scale_nine_are_not_a_refusal() {
     padded.low = dec("9.00");
     padded.close = dec("10.500000000000");
 
-    write_prices(vec![padded], &path).expect("padded zeros are exactly representable");
+    write_prices(vec![padded], &path, "synthetic").expect("padded zeros are exactly representable");
     let read = read_prices(&path).expect("read");
     assert_eq!(read[0].close, dec("10.5"));
+}
+
+// --- P5: the synthetic twin of the measured probe ---------------------------
+//
+// The live probe on 2026-08-09 measured two arithmetic regimes in the vendor's
+// split adjustment. Its verbatim output is recorded at
+// `ContinuationDocs/2026-08-09-probe-output.md`, which is gitignored, and no
+// vendor row is committed anywhere: Sharadar's licence forbids redistributing
+// rows and CLAUDE.md applies that to fixtures as strictly as to a data
+// directory.
+//
+// So the facts are preserved as a twin. Every number below is fabricated and
+// engineered to reproduce the measured behaviour exactly. The free window rolls
+// forward and the 2022 splits leave it around mid-2027; these tests do not.
+
+/// A bar carrying one candidate reconstruction of a traded open.
+///
+/// `high` and `low` are deliberately wide so validation passes and the only
+/// thing under test is whether the codec will store the value.
+fn reconstruction_bar(
+    reconstructed_open: Decimal,
+    close: Decimal,
+    unadjusted: Decimal,
+) -> AdjustedBar {
+    AdjustedBar {
+        asset: sharadar("TWIN", 1),
+        date: day(2022, 8, 22),
+        open: reconstructed_open,
+        high: dec("1000000"),
+        low: dec("0.01"),
+        close,
+        volume: dec("1000"),
+        close_unadjusted: unadjusted,
+        session: SessionScope::RegularHours,
+        close_kind: CloseKind::ClosingAuction,
+    }
+}
+
+/// The 20-for-1 regime: the factor is exactly 0.05, so reconstruction is clean.
+///
+/// Twin of the measured GOOG and AMZN windows, where `close x 20` reproduced
+/// `closeunadj` with a residual of exactly 0 and every reconstruction needed no
+/// more than two decimal places.
+#[test]
+fn p5_a_twenty_for_one_twin_reconstructs_exactly_and_stores() {
+    let close = dec("100.00");
+    let unadjusted = dec("2000.00");
+    let adjusted_open = dec("105.00");
+
+    // The vendor's own adjustment is exact in this regime.
+    assert_eq!(close * dec("20"), unadjusted, "the twin must be exact");
+
+    // open / (close / closeunadj), as one division so nothing rounds twice.
+    let reconstructed = (adjusted_open * unadjusted) / close;
+    assert_eq!(reconstructed.normalize(), dec("2100"));
+    assert!(
+        reconstructed.normalize().scale() <= 9,
+        "a clean regime must land inside the codec's scale"
+    );
+
+    let path = scratch("p5-clean").join("prices.parquet");
+    write_prices(
+        vec![reconstruction_bar(reconstructed, close, unadjusted)],
+        &path,
+        "synthetic",
+    )
+    .expect("an exactly representable reconstruction stores");
+}
+
+/// The 3-for-1 regime: the vendor already rounded, so nothing reconstructs.
+///
+/// Twin of the measured TSLA window. Two facts are reproduced. The adjusted
+/// close misses the traded close by a residual in the 0.001 class, and the
+/// implied factor therefore differs from a true third, so dividing by it gives
+/// a repeating decimal far past the scale the curated codec stores.
+#[test]
+fn p5_a_three_for_one_twin_is_refused_rather_than_rounded() {
+    let unadjusted = dec("600.01");
+    // 600.01 / 3 is 200.00333..., which the vendor ships rounded to 3 places.
+    let close = dec("200.003");
+    let adjusted_open = dec("210.005");
+
+    // Fact one: the vendor's adjustment is not exact here.
+    let residual = unadjusted - close * dec("3");
+    assert_eq!(residual, dec("0.001"), "the twin must carry the residual");
+
+    // Fact two: the reconstruction is a repeating decimal.
+    let reconstructed = (adjusted_open * unadjusted) / close;
+    assert!(
+        reconstructed.normalize().scale() > 9,
+        "the twin must need more scale than the codec stores, got {}",
+        reconstructed.normalize()
+    );
+
+    // And the codec refuses it rather than rounding it into range. Rounding
+    // would produce a traded price nobody traded at, which is the whole reason
+    // this dataset stores what the vendor shipped instead.
+    let path = scratch("p5-repeating").join("prices.parquet");
+    let error = write_prices(
+        vec![reconstruction_bar(reconstructed, close, unadjusted)],
+        &path,
+        "synthetic",
+    )
+    .expect_err("a repeating reconstruction must not be stored");
+
+    assert!(
+        matches!(error, CurateError::InexactDecimal { field: "open", .. }),
+        "got {error:?}"
+    );
+}
+
+/// The control: no split in the window, so the two closes agree.
+#[test]
+fn p5_a_no_split_twin_has_one_close() {
+    let price = dec("250.00");
+    let bar = reconstruction_bar(price, price, price);
+    assert_eq!(bar.close, bar.close_unadjusted);
+
+    let path = scratch("p5-control").join("prices.parquet");
+    write_prices(vec![bar], &path, "synthetic").expect("a control row stores");
+    let read = read_prices(&path).expect("read");
+    assert_eq!(read[0].close, read[0].close_unadjusted);
 }

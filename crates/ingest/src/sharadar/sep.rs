@@ -20,7 +20,7 @@ use super::client::{SharadarClient, check_query_safe};
 use crate::provider::SourceError;
 
 /// The columns the probe reads.
-const COLUMNS: &str = "ticker,date,open,high,low,close,closeunadj,lastupdated";
+const COLUMNS: &str = "ticker,date,open,high,low,close,volume,closeunadj,lastupdated";
 
 /// One SEP row as shipped, with no adjustment applied or undone.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +32,7 @@ pub struct SepRow {
     pub high: Decimal,
     pub low: Decimal,
     pub close: Decimal,
+    pub volume: Decimal,
     /// The official exchange close with no adjustment of any kind.
     pub close_unadjusted: Decimal,
     pub last_updated: Option<Date>,
@@ -69,6 +70,7 @@ impl SharadarClient {
                 high: row.decimal("high")?,
                 low: row.decimal("low")?,
                 close: row.decimal("close")?,
+                volume: row.decimal("volume")?,
                 close_unadjusted: row.decimal("closeunadj")?,
                 last_updated: row.optional_date("lastupdated")?,
             })

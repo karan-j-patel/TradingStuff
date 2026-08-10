@@ -49,7 +49,9 @@ mod tests;
 pub use actions::{read_actions, write_actions};
 pub use delistings::{read_delistings, write_delistings};
 pub use error::CurateError;
-pub use prices::{read_prices, write_prices};
+pub use prices::{
+    BASIS, BASIS_KEY, Provenance, SOURCE_KEY, prices_provenance, read_prices, write_prices,
+};
 
 use crate::schema::AssetKey;
 use codec::{Identity, describe, encode_identity};
@@ -304,11 +306,23 @@ pub(crate) fn write_atomically(
 /// Fixed rather than configurable because a knob here changes bytes on disk for
 /// no gain a caller could reason about. zstd is the best ratio of the codecs
 /// parquet ships by default, and statistics let a reader skip row groups.
-pub(crate) fn writer_properties() -> ::parquet::file::properties::WriterProperties {
+pub(crate) fn writer_properties(
+    extra: &[(&str, &str)],
+) -> ::parquet::file::properties::WriterProperties {
     use ::parquet::basic::{Compression, ZstdLevel};
+    use ::parquet::file::metadata::KeyValue;
     use ::parquet::file::properties::{EnabledStatistics, WriterProperties};
 
+    // File-level key-value metadata, so a reader that is not this crate — a
+    // DuckDB session, a pandas call — can still see what the numbers are
+    // without being told out of band.
+    let metadata: Vec<KeyValue> = extra
+        .iter()
+        .map(|(key, value)| KeyValue::new((*key).to_string(), (*value).to_string()))
+        .collect();
+
     WriterProperties::builder()
+        .set_key_value_metadata((!metadata.is_empty()).then_some(metadata))
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .set_statistics_enabled(EnabledStatistics::Chunk)
         .build()

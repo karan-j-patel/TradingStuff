@@ -23,16 +23,18 @@
 //! [`std::fmt::Debug`] is hand-written for the same reason. A derived one would
 //! print the key the first time anybody wrote `dbg!(&client)`.
 
+use std::cell::OnceCell;
 use std::fmt;
 use std::time::Duration;
 
 use super::decode::{Page, RowReader};
 use super::http::{Http, UreqHttp};
 use super::{
-    BASE_URL, BODY_EXCERPT, KEY_VAR, MAX_ATTEMPTS, MAX_PAGES, NATIVE_BASE_URL, NATIVE_MAX_ATTEMPTS,
-    NATIVE_PAGE_SIZE, NATIVE_RETRY_PAUSE, PROVIDER, RETRY_PAUSE, refused,
+    BASE_URL, BODY_EXCERPT, KEY_VAR, MAX_ATTEMPTS, MAX_PAGES, NATIVE_BASE_URL, NATIVE_PAGE_SIZE,
+    PROVIDER, RETRY_PAUSE, refused,
 };
 use crate::provider::SourceError;
+use jiff::civil::Date;
 
 pub struct SharadarClient {
     http: Box<dyn Http>,
@@ -44,16 +46,20 @@ pub struct SharadarClient {
     base: String,
     /// Total attempts per request, the first one included.
     ///
-    /// Per host, because the two doors publish different limits and deserve
-    /// different manners. The datatables endpoint documents a generous quota
-    /// and gets three quick attempts. The native endpoint publishes no limits
-    /// at all, so it gets one attempt, one long wait, and one more.
+    /// A field rather than a constant read directly so a test can exercise the
+    /// policy without waiting for it. Both doors carry the same value.
     attempts: u32,
     /// Zero under test, which is what keeps the retry path deterministic.
     pause: Duration,
     /// Rows per page on the native door. A field so a test can walk a
     /// boundary with three rows instead of three thousand.
     page_size: usize,
+    /// The measured start of the window this key is served, once per client.
+    ///
+    /// `OnceCell` rather than a plain field because measuring it costs a
+    /// request, and rather than a lock because this client is single-threaded
+    /// by construction: it owns a `Box<dyn Http>` that is not `Sync` either.
+    earliest: OnceCell<Option<Date>>,
 }
 
 impl fmt::Debug for SharadarClient {
@@ -94,23 +100,22 @@ impl SharadarClient {
             attempts: MAX_ATTEMPTS,
             pause: RETRY_PAUSE,
             page_size: NATIVE_PAGE_SIZE,
+            earliest: OnceCell::new(),
         })
     }
 
     /// Build a client for the native `api.sharadar.com` door.
     ///
-    /// Same key, same safety core, different manners. This host publishes no
-    /// rate limits at all, so the only safe assumption is that it has one and
-    /// we cannot see it. Round 1 established what fast retries do to a speed
-    /// limit: three attempts 0.5 seconds apart turned a throttle into a
-    /// disabled account. So this door retries once, after a wait long enough
-    /// to be worth making.
+    /// Same key, same safety core, same retry conduct, different URL shape and
+    /// envelope. This host publishes no rate limits at all, and the other one's
+    /// published quota turned out to be no protection either, so both wait.
     pub fn native_from_env() -> Result<Self, SourceError> {
         Ok(SharadarClient {
             base: NATIVE_BASE_URL.to_string(),
-            attempts: NATIVE_MAX_ATTEMPTS,
-            pause: NATIVE_RETRY_PAUSE,
+            attempts: MAX_ATTEMPTS,
+            pause: RETRY_PAUSE,
             page_size: NATIVE_PAGE_SIZE,
+            earliest: OnceCell::new(),
             ..Self::from_env()?
         })
     }
@@ -127,6 +132,7 @@ impl SharadarClient {
             // decisions, not for its timing.
             pause: Duration::ZERO,
             page_size: NATIVE_PAGE_SIZE,
+            earliest: OnceCell::new(),
         }
     }
 
@@ -139,6 +145,18 @@ impl SharadarClient {
 
     pub(crate) fn page_size(&self) -> usize {
         self.page_size
+    }
+
+    /// The measured window start, cached after the first measurement.
+    pub(crate) fn measured_earliest(&self, ticker: &str) -> Result<Option<Date>, SourceError> {
+        if let Some(cached) = self.earliest.get() {
+            return Ok(*cached);
+        }
+        let measured = self.native_earliest_date(ticker)?;
+        // A failed measurement is deliberately not cached, so a transient
+        // network failure does not pin a wrong boundary for the client's life.
+        let _ = self.earliest.set(measured);
+        Ok(measured)
     }
 
     /// One native request. Same retry, same scrubbing, different URL shape.

@@ -1,9 +1,27 @@
-//! The prices dataset: one `PriceBar` per row.
+//! The prices dataset: one [`AdjustedBar`] per row.
 //!
-//! There is deliberately no adjusted column. Adjustment is computed in
-//! `crate::adjust` from raw prices plus explicit corporate action records, and
-//! storing a vendor's version of it here would put a number nobody can
-//! reproduce into the curated layer.
+//! # What the numbers in this file are
+//!
+//! `open`, `high`, `low` and `close` are on the vendor's split-and-stock-
+//! dividend-adjusted basis, stored exactly as shipped, rounding included.
+//! `close_unadjusted` is the as-traded close and is exact. That is not a
+//! preference, it is what the vendor has: the probe on 2026-08-09 measured a
+//! 3-for-1 split where the adjusted close missed the traded close by `0.001`
+//! and the implied factor differed on every row, so the traded open, high and
+//! low are not recoverable and are not stored.
+//!
+//! Adjustment for cash dividends and spinoffs is still computed in
+//! `crate::adjust` from explicit corporate action records. What is stored here
+//! is the vendor's split handling, which cannot be undone, labelled so nobody
+//! has to guess.
+//!
+//! # The label is in the file, not only in this comment
+//!
+//! Parquet key-value metadata carries the basis string, and [`read_prices`]
+//! refuses a file that lacks it or disagrees with it. A comment binds this
+//! crate's readers; the metadata binds a DuckDB session and a pandas call too,
+//! which are the readers most likely to assume a column named `close` is the
+//! price something traded at.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -18,9 +36,22 @@ use super::codec::{
     decode_identity, optional_str, required_date, required_decimal, required_str, string_column,
 };
 use super::enums::{close_kind_from, close_kind_str, session_from, session_str};
-use crate::schema::{PriceBar, validate_batch};
+use crate::adjusted::{AdjustedBar, validate_adjusted};
 
 pub(crate) const DATASET: &str = "prices";
+
+/// The metadata key naming what basis the price columns are on.
+pub const BASIS_KEY: &str = "price_basis";
+
+/// The only basis this dataset holds, and the only one its reader accepts.
+///
+/// A second basis would need its own value here and a reader that branches on
+/// it. Until one exists, a file claiming anything else is a file this code did
+/// not write and does not understand.
+pub const BASIS: &str = "split_and_stock_dividend_adjusted";
+
+/// The metadata key naming the data vendor the rows came from.
+pub const SOURCE_KEY: &str = "source";
 
 /// The column layout, which is also what the reader checks a file against.
 pub(crate) fn schema() -> Arc<Schema> {
@@ -30,14 +61,28 @@ pub(crate) fn schema() -> Arc<Schema> {
         Field::new("permanent_id_kind", DataType::Utf8, true),
         Field::new("permanent_id", DataType::Utf8, true),
         Field::new("date", DataType::Date32, false),
+        // Adjusted, per BASIS. The names are the vendor's and are kept so a
+        // reader recognises them; the basis metadata is what says what they mean.
         Field::new("open", decimal.clone(), false),
         Field::new("high", decimal.clone(), false),
         Field::new("low", decimal.clone(), false),
         Field::new("close", decimal.clone(), false),
-        Field::new("volume", decimal, false),
+        Field::new("volume", decimal.clone(), false),
+        // As traded, exact. Not null: a row without it has no as-traded price
+        // at all, which is a row this dataset has no use for.
+        Field::new("close_unadjusted", decimal, false),
         Field::new("session", DataType::Utf8, false),
         Field::new("close_kind", DataType::Utf8, false),
     ]))
+}
+
+/// What a prices file says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provenance {
+    /// Always [`BASIS`] for a file this reader accepts.
+    pub basis: String,
+    /// The data vendor the rows came from.
+    pub source: String,
 }
 
 /// Write bars to `path`, returning how many rows landed.
@@ -46,12 +91,20 @@ pub(crate) fn schema() -> Arc<Schema> {
 /// a value that cannot be represented fails with the previous file still in
 /// place. A writer that opened the file first and validated second would report
 /// the same error and still have destroyed the data.
-pub fn write_prices(bars: Vec<PriceBar>, path: &Path) -> Result<usize, CurateError> {
+/// `source` names the data vendor and is recorded in the file's metadata. It
+/// is per write rather than per row: every row in one curated file comes from
+/// one fetch, and a per-row column would invite mixing vendors in a file whose
+/// numbers are only comparable because they do not.
+pub fn write_prices(
+    bars: Vec<AdjustedBar>,
+    path: &Path,
+    source: &str,
+) -> Result<usize, CurateError> {
     // Validation is the writer's job, not the caller's. This function is
     // publicly exported, so a caller that never goes through `cli curate` still
     // cannot put a record the domain rejects into a curated file.
     let total = bars.len();
-    let report = validate_batch(bars);
+    let report = validate_adjusted(bars);
     if !report.rejected.is_empty() {
         return Err(super::invalid_records(
             DATASET,
@@ -75,6 +128,7 @@ pub fn write_prices(bars: Vec<PriceBar>, path: &Path) -> Result<usize, CurateErr
     let mut low = Vec::with_capacity(count);
     let mut close = Vec::with_capacity(count);
     let mut volume = Vec::with_capacity(count);
+    let mut close_unadjusted = Vec::with_capacity(count);
     let mut session = Vec::with_capacity(count);
     let mut close_kind = Vec::with_capacity(count);
 
@@ -88,6 +142,11 @@ pub fn write_prices(bars: Vec<PriceBar>, path: &Path) -> Result<usize, CurateErr
         low.push(decimal_to_i128(DATASET, "low", bar.low)?);
         close.push(decimal_to_i128(DATASET, "close", bar.close)?);
         volume.push(decimal_to_i128(DATASET, "volume", bar.volume)?);
+        close_unadjusted.push(decimal_to_i128(
+            DATASET,
+            "close_unadjusted",
+            bar.close_unadjusted,
+        )?);
         session.push(session_str(bar.session));
         close_kind.push(close_kind_str(bar.close_kind));
     }
@@ -104,6 +163,7 @@ pub fn write_prices(bars: Vec<PriceBar>, path: &Path) -> Result<usize, CurateErr
             decimals(low)?,
             decimals(close)?,
             decimals(volume)?,
+            decimals(close_unadjusted)?,
             Arc::new(StringArray::from(session)),
             Arc::new(StringArray::from(close_kind)),
         ],
@@ -113,7 +173,10 @@ pub fn write_prices(bars: Vec<PriceBar>, path: &Path) -> Result<usize, CurateErr
         let mut writer = ::parquet::arrow::ArrowWriter::try_new(
             file,
             schema(),
-            Some(super::writer_properties()),
+            Some(super::writer_properties(&[
+                (BASIS_KEY, BASIS),
+                (SOURCE_KEY, source),
+            ])),
         )?;
         writer.write(&batch)?;
         writer.close()?;
@@ -132,10 +195,18 @@ fn decimals(values: Vec<i128>) -> Result<ArrayRef, CurateError> {
 }
 
 /// Read every bar back, in the order the file holds them.
-pub fn read_prices(path: &Path) -> Result<Vec<PriceBar>, CurateError> {
+///
+/// The basis metadata is checked before a single row is decoded. A file that
+/// does not say what its prices are on is a file whose numbers cannot be used,
+/// and reading it anyway would be the exact mistake [`AdjustedBar`] exists to
+/// make impossible in memory.
+pub fn read_prices(path: &Path) -> Result<Vec<AdjustedBar>, CurateError> {
     let file = super::open(path)?;
-    let reader =
-        ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+
+    provenance_of(builder.metadata().file_metadata().key_value_metadata())?;
+
+    let reader = builder.build()?;
 
     let mut bars = Vec::new();
     // Row numbers in errors are counted across the whole file rather than
@@ -154,11 +225,12 @@ pub fn read_prices(path: &Path) -> Result<Vec<PriceBar>, CurateError> {
         let low = decimal_column(&batch, DATASET, "low")?;
         let close = decimal_column(&batch, DATASET, "close")?;
         let volume = decimal_column(&batch, DATASET, "volume")?;
+        let close_unadjusted = decimal_column(&batch, DATASET, "close_unadjusted")?;
         let session = string_column(&batch, DATASET, "session")?;
         let close_kind = string_column(&batch, DATASET, "close_kind")?;
 
         for row in 0..batch.num_rows() {
-            bars.push(PriceBar {
+            bars.push(AdjustedBar {
                 asset: decode_identity(
                     DATASET,
                     offset + row,
@@ -172,6 +244,12 @@ pub fn read_prices(path: &Path) -> Result<Vec<PriceBar>, CurateError> {
                 low: required_decimal(low, DATASET, "low", row)?,
                 close: required_decimal(close, DATASET, "close", row)?,
                 volume: required_decimal(volume, DATASET, "volume", row)?,
+                close_unadjusted: required_decimal(
+                    close_unadjusted,
+                    DATASET,
+                    "close_unadjusted",
+                    row,
+                )?,
                 session: session_from(DATASET, required_str(session, DATASET, "session", row)?)?,
                 close_kind: close_kind_from(
                     DATASET,
@@ -183,4 +261,55 @@ pub fn read_prices(path: &Path) -> Result<Vec<PriceBar>, CurateError> {
     }
 
     Ok(bars)
+}
+
+/// What a curated prices file declares about itself.
+///
+/// Exposed so a caller can ask which vendor a file came from without decoding
+/// every row, and so the basis and the source are always read together: either
+/// alone is half an answer.
+pub fn prices_provenance(path: &Path) -> Result<Provenance, CurateError> {
+    let file = super::open(path)?;
+    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+    provenance_of(builder.metadata().file_metadata().key_value_metadata())
+}
+
+/// Read both keys, refusing a file that does not declare what this reader needs.
+fn provenance_of(
+    metadata: Option<&Vec<::parquet::file::metadata::KeyValue>>,
+) -> Result<Provenance, CurateError> {
+    let value = |key: &str| {
+        metadata
+            .into_iter()
+            .flatten()
+            .find(|entry| entry.key == key)
+            .and_then(|entry| entry.value.as_deref())
+    };
+
+    let basis = match value(BASIS_KEY) {
+        Some(BASIS) => BASIS.to_owned(),
+        Some(other) => {
+            return Err(CurateError::UnexpectedMetadata {
+                dataset: DATASET,
+                key: BASIS_KEY,
+                expected: BASIS,
+                found: other.to_owned(),
+            });
+        }
+        None => {
+            return Err(CurateError::MissingMetadata {
+                dataset: DATASET,
+                key: BASIS_KEY,
+            });
+        }
+    };
+
+    let source = value(SOURCE_KEY)
+        .ok_or(CurateError::MissingMetadata {
+            dataset: DATASET,
+            key: SOURCE_KEY,
+        })?
+        .to_owned();
+
+    Ok(Provenance { basis, source })
 }

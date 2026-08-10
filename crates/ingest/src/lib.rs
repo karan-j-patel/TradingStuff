@@ -15,6 +15,7 @@
 
 pub mod actions;
 pub mod adjust;
+pub mod adjusted;
 pub mod parquet;
 pub mod provider;
 pub mod schema;
@@ -28,6 +29,7 @@ pub use actions::{
 pub use adjust::{
     AdjustedPoint, AdjustedSeries, AdjustmentMode, UnexplainedStep, adjust, unexplained_steps,
 };
+pub use adjusted::{AdjustedBar, validate_adjusted};
 pub use parquet::{
     CurateError, DEFAULT_DATA_ROOT, actions_path, data_root, delistings_path, prices_path,
     read_actions, read_delistings, read_prices, write_actions, write_delistings, write_prices,

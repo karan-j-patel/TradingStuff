@@ -117,7 +117,7 @@ pub fn write_delistings(rows: Vec<Delisting>, path: &Path) -> Result<usize, Cura
         let mut writer = ::parquet::arrow::ArrowWriter::try_new(
             file,
             schema(),
-            Some(super::writer_properties()),
+            Some(super::writer_properties(&[])),
         )?;
         writer.write(&batch)?;
         writer.close()?;

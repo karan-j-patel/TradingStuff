@@ -19,7 +19,8 @@ fn m4_write_prices_refuses_an_invalid_bar() {
     broken.high = dec("9.00");
     broken.low = dec("11.00");
 
-    let error = write_prices(vec![broken], &path).expect_err("an invalid bar must be refused");
+    let error =
+        write_prices(vec![broken], &path, "synthetic").expect_err("an invalid bar must be refused");
     assert!(
         matches!(error, CurateError::InvalidRecords { .. }),
         "got {error:?}"
@@ -102,13 +103,14 @@ fn m4_a_refused_write_leaves_the_previous_file_byte_identical() {
     let path = scratch("v-intact").join("prices.parquet");
 
     let good = bar(sharadar("KEEP", 4), day(2020, 1, 2), dec("42.00"));
-    write_prices(vec![good.clone()], &path).expect("the first write succeeds");
+    write_prices(vec![good.clone()], &path, "synthetic").expect("the first write succeeds");
     let before = std::fs::read(&path).expect("reading the good file");
 
     let mut broken = bar(sharadar("KEEP", 4), day(2020, 1, 3), dec("10.00"));
     broken.high = dec("9.00");
     broken.low = dec("11.00");
-    write_prices(vec![good, broken], &path).expect_err("an invalid bar must be refused");
+    write_prices(vec![good, broken], &path, "synthetic")
+        .expect_err("an invalid bar must be refused");
 
     let after = std::fs::read(&path).expect("reading the file again");
     assert_eq!(

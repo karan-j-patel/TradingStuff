@@ -20,8 +20,8 @@ use rust_decimal::Decimal;
 use super::client::SharadarClient;
 use super::columns::{datatables, native, native_tables};
 use super::http::{Http, HttpFailure, HttpReply};
-use crate::provider::SourceError;
-use crate::schema::PermanentId;
+use crate::provider::{AdjustedPriceSource, SourceError};
+use crate::schema::{AssetKey, PermanentId};
 
 const TEST_KEY: &str = "synthetic-not-a-real-credential-a1b2c3";
 const BASE: &str = "https://fixture.invalid/v1.0/data";
@@ -115,14 +115,14 @@ fn envelope(rows: &[String]) -> String {
 /// One fabricated price row, numbers bare as the host actually sends them.
 fn price_row(date: &str, close: &str, close_unadjusted: &str) -> String {
     format!(
-        r#"{{"ticker":"ZZTOP","date":"{date}","open":10.25,"high":10.9,"low":9.9,"close":{close},"closeunadj":{close_unadjusted},"lastupdated":"2022-09-01"}}"#
+        r#"{{"ticker":"ZZTOP","date":"{date}","open":10.25,"high":10.9,"low":9.9,"close":{close},"volume":1000,"closeunadj":{close_unadjusted},"lastupdated":"2022-09-01"}}"#
     )
 }
 
 /// The same row with its keys in a different order and one number quoted.
 fn price_row_reordered(date: &str, close: &str, close_unadjusted: &str) -> String {
     format!(
-        r#"{{"lastupdated":"2022-09-01","closeunadj":{close_unadjusted},"close":{close},"low":9.9,"high":10.9,"open":"10.25","date":"{date}","ticker":"ZZTOP"}}"#
+        r#"{{"lastupdated":"2022-09-01","closeunadj":{close_unadjusted},"volume":1000,"close":{close},"low":9.9,"high":10.9,"open":"10.25","date":"{date}","ticker":"ZZTOP"}}"#
     )
 }
 
@@ -193,7 +193,7 @@ fn n1_key_order_and_number_spelling_do_not_change_the_values() {
 fn n1_a_count_that_disagrees_with_the_rows_is_malformed() {
     let fake = Fake::serving(
         WIRE_STOCKS,
-        &[r#"{"count":7,"data":[{"ticker":"ZZTOP","date":"2022-08-22","open":1,"high":1,"low":1,"close":1,"closeunadj":1,"lastupdated":"2022-09-01"}]}"#.to_string()],
+        &[r#"{"count":7,"data":[{"ticker":"ZZTOP","date":"2022-08-22","open":1,"high":1,"low":1,"close":1,"volume":1,"closeunadj":1,"lastupdated":"2022-09-01"}]}"#.to_string()],
     );
 
     assert!(matches!(
@@ -480,5 +480,164 @@ fn n5_debug_on_a_native_client_carries_no_key() {
     assert!(
         !rendered.contains(TEST_KEY),
         "Debug leaked the key: {rendered}"
+    );
+}
+
+// --- P4: the measured window is enforced ------------------------------------
+
+/// A client whose window measurement and price window are both scripted.
+///
+/// The first `stocks` body answers the `limit=1` boundary measurement; the rest
+/// answer the fetch. That ordering is the real request order, so a test that
+/// got it wrong would fail rather than quietly pass.
+fn windowed(pages: &[String]) -> Rc<Fake> {
+    let mut bodies = vec![envelope(&[price_row("2021-08-10", "1", "1")])];
+    bodies.extend_from_slice(pages);
+    Fake::serving(WIRE_STOCKS, &bodies)
+}
+
+fn range(from: &str, to: &str) -> crate::provider::DateRange {
+    crate::provider::DateRange::new(date(from), date(to)).expect("valid range")
+}
+
+#[test]
+fn p4_the_measured_boundary_is_reported() {
+    let fake = windowed(&[]);
+    let measured = client(&fake)
+        .earliest_available()
+        .expect("the boundary is measurable");
+
+    assert_eq!(measured, Some(date("2021-08-10")));
+    assert!(
+        fake.seen.borrow()[0].contains("limit=1"),
+        "the measurement must be one row, not a walk: {}",
+        fake.seen.borrow()[0]
+    );
+}
+
+#[test]
+fn p4_a_range_reaching_before_the_boundary_errors_naming_it() {
+    // A page is queued deliberately, so that code which clipped the range to
+    // the boundary instead of refusing would succeed and return a short
+    // series. The failure this test must produce is "it worked", not "it ran
+    // out of fixture".
+    let fake = windowed(&[envelope(&[price_row("2022-08-22", "10.25", "41.00")])]);
+    let error = client(&fake)
+        .fetch_adjusted(
+            &[AssetKey::ticker_only("ZZTOP")],
+            range("2019-01-02", "2022-01-02"),
+        )
+        .expect_err("a range before the measured window must not be served");
+
+    let rendered = error.to_string();
+    assert!(matches!(error, SourceError::Refused { .. }));
+    assert!(
+        rendered.contains("2021-08-10"),
+        "the error must name the boundary: {rendered}"
+    );
+    assert_eq!(
+        fake.calls(),
+        1,
+        "the refusal must cost the measurement and nothing more"
+    );
+}
+
+#[test]
+fn p4_a_range_inside_the_boundary_proceeds() {
+    let fake = windowed(&[envelope(&[price_row("2022-08-22", "289.913", "869.74")])]);
+
+    let bars = client(&fake)
+        .fetch_adjusted(
+            &[AssetKey::ticker_only("ZZTOP")],
+            range("2022-08-22", "2022-08-30"),
+        )
+        .expect("a range inside the window is served");
+
+    assert_eq!(bars.len(), 1);
+    assert_eq!(bars[0].close, decimal("289.913"));
+    assert_eq!(bars[0].close_unadjusted, decimal("869.74"));
+}
+
+/// The boundary costs one request per client, not one per fetch.
+#[test]
+fn p4_the_boundary_is_measured_once() {
+    let fake = windowed(&[
+        envelope(&[price_row("2022-08-22", "1", "1")]),
+        envelope(&[price_row("2022-08-23", "2", "2")]),
+    ]);
+    let source = client(&fake);
+
+    for _ in 0..2 {
+        source
+            .fetch_adjusted(
+                &[AssetKey::ticker_only("ZZTOP")],
+                range("2022-08-22", "2022-08-30"),
+            )
+            .expect("served");
+    }
+
+    assert_eq!(
+        fake.calls(),
+        3,
+        "one measurement plus two fetches, not two measurements"
+    );
+}
+
+// --- P6: vendor JSON to validated Parquet, end to end -----------------------
+
+/// The whole door in one test: scripted vendor response, through the source,
+/// through validation, into a curated file, and back out.
+///
+/// The CLI layer above this is argument plumbing; what it calls is exactly this
+/// sequence, and the live run reported alongside exercises the plumbing.
+#[test]
+fn p6_a_fetch_becomes_a_curated_file() {
+    // Closes inside the fixture's own high-low band, because these rows go
+    // through validation rather than only through the decoder.
+    let fake = windowed(&[envelope(&[
+        price_row("2022-08-22", "10.25", "41.00"),
+        price_row("2022-08-23", "10.50", "42.00"),
+    ])]);
+
+    let bars = client(&fake)
+        .fetch_adjusted(
+            &[AssetKey::ticker_only("ZZTOP")],
+            range("2022-08-22", "2022-08-30"),
+        )
+        .expect("fetched");
+
+    let report = crate::adjusted::validate_adjusted(bars);
+    assert!(report.rejected.is_empty(), "vendor rows must validate");
+
+    let dir = std::env::temp_dir().join("p6-fetch-to-parquet");
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = crate::parquet::prices_path(&dir);
+    let written = crate::parquet::write_prices(report.accepted, &path, "synthetic").expect("write");
+    assert_eq!(written, 2);
+
+    let read = crate::parquet::read_prices(&path).expect("read");
+    assert_eq!(read.len(), 2);
+    assert_eq!(read[0].close_unadjusted, decimal("41.00"));
+    assert_eq!(read[0].asset.ticker, "ZZTOP");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- P7: retry conduct, this door ------------------------------------------
+
+#[test]
+fn p7_the_native_door_makes_one_attempt_one_wait_one_more() {
+    let fake = Rc::new(Fake {
+        failures: RefCell::new(std::iter::repeat_n("connection refused".to_string(), 8).collect()),
+        ..Default::default()
+    });
+
+    client(&fake)
+        .native_tickers(&["ZZTOP"])
+        .expect_err("an unreachable host must error");
+
+    assert_eq!(
+        fake.calls(),
+        2,
+        "one long wait and one retry, never a burst of fast ones"
     );
 }

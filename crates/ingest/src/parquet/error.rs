@@ -119,6 +119,25 @@ pub enum CurateError {
         detail: String,
     },
 
+    /// A curated file must say what basis its numbers are on. Without it the
+    /// columns are unreadable in the only sense that matters: a reader can get
+    /// values out and cannot know what they mean.
+    #[error(
+        "{dataset} file carries no {key} metadata, so nothing in it says what basis its prices are on"
+    )]
+    MissingMetadata {
+        dataset: &'static str,
+        key: &'static str,
+    },
+
+    #[error("{dataset} file says {key}={found:?}, but this reader only understands {expected:?}")]
+    UnexpectedMetadata {
+        dataset: &'static str,
+        key: &'static str,
+        expected: &'static str,
+        found: String,
+    },
+
     #[error("{dataset} has no column named {field}")]
     MissingColumn {
         dataset: &'static str,

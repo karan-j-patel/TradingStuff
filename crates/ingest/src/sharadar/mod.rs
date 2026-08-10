@@ -151,31 +151,28 @@ const BASE_URL: &str = "https://data.nasdaq.com/api/v3/datatables/SHARADAR";
 /// null turning a fetch into an unbounded loop against a metered API.
 const MAX_PAGES: usize = 10_000;
 
-/// Total attempts per request, the first one included.
-const MAX_ATTEMPTS: u32 = 3;
+/// Total attempts per request, the first one included: one try, one wait, one
+/// more, then fail.
+///
+/// One rule for both doors. Round 1 measured the alternative on the datatables
+/// host: three attempts half a second apart against a speed limit turned a
+/// throttle into a disabled account, because each retry was itself another
+/// offence. A published quota does not make that less true, it only makes the
+/// damage take longer to arrive.
+const MAX_ATTEMPTS: u32 = 2;
 
-/// Base delay between retries, doubled on each further attempt.
+/// The single wait between the two attempts.
+///
+/// Long enough to be worth making rather than short enough to feel responsive.
+/// A throttle measured in seconds is cleared by a wait measured in seconds; one
+/// measured in minutes is not, and neither host tells you which it is using.
 ///
 /// Real in production and zero under test, which is what keeps the retry path
 /// deterministic and instant to exercise. See [`SharadarClient::with_transport`].
-const RETRY_PAUSE: Duration = Duration::from_millis(500);
+const RETRY_PAUSE: Duration = Duration::from_secs(120);
 
 /// Where the native API lives. See [`native`] for how it differs.
 const NATIVE_BASE_URL: &str = "https://api.sharadar.com/v1.0/data";
-
-/// The native door gets one attempt, one wait, one more, and then fails.
-///
-/// This host publishes no rate limits, so the only safe assumption is that it
-/// has one nobody can see. Round 1 measured what the alternative costs: three
-/// attempts half a second apart against a speed limit turned a throttle into a
-/// disabled account, because each retry was itself another offence.
-const NATIVE_MAX_ATTEMPTS: u32 = 2;
-
-/// Long enough to be worth waiting, rather than long enough to be polite about.
-///
-/// A throttle measured in seconds is cleared by a wait measured in seconds; one
-/// measured in minutes is not, and there is no way to tell which this host uses.
-const NATIVE_RETRY_PAUSE: Duration = Duration::from_secs(120);
 
 /// Rows requested per native page.
 ///

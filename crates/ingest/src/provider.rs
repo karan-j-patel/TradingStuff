@@ -110,6 +110,46 @@ pub trait PriceSource {
     ) -> Result<Vec<PriceBar>, SourceError>;
 }
 
+/// A source of daily prices on a vendor's adjusted basis.
+///
+/// Separate from [`PriceSource`] rather than a variant of it, because the two
+/// promise different numbers and no amount of care at a call site keeps that
+/// straight. `PriceSource` promises prices as traded. A vendor that ships
+/// split-adjusted open, high and low cannot honestly implement it, so it
+/// implements this instead and the difference is visible in the type a caller
+/// receives. See [`crate::adjusted::AdjustedBar`] for the barrier itself.
+pub trait AdjustedPriceSource {
+    fn name(&self) -> &str;
+
+    /// The earliest date this source will actually serve.
+    ///
+    /// # Measured, never claimed
+    ///
+    /// This returns a `Result` where [`PriceSource::earliest_available`]
+    /// returns a bare `Option`, and the difference is the point. A boundary
+    /// taken from vendor metadata is a claim, and the claim can be wrong:
+    /// Sharadar's TICKERS table reports a first price date of 2010 for TSLA
+    /// while the key in use serves nothing before 2021-08-10. An implementation
+    /// here measures the boundary by asking for data, so it can fail, so it
+    /// says so.
+    ///
+    /// `None` means the source served nothing at all, which is different from
+    /// an unknown boundary and different again from an error.
+    fn earliest_available(&self) -> Result<Option<Date>, SourceError>;
+
+    /// Fetch adjusted bars, refusing a range the source cannot honestly cover.
+    ///
+    /// A request reaching before [`AdjustedPriceSource::earliest_available`] is
+    /// an error naming the boundary, never a quietly shortened series. Silent
+    /// truncation is the failure mode that trains a model on less history than
+    /// anyone thinks it has.
+    fn fetch_adjusted(
+        &self,
+        assets: &[AssetKey],
+        range: DateRange,
+    ) -> Result<Vec<crate::adjusted::AdjustedBar>, SourceError>;
+}
+
 /// One fundamental observation, carrying the two dates that must never be
 /// confused.
 ///

@@ -274,13 +274,27 @@ impl PriceBar {
 /// Rejections are counted by cause rather than discarded, because a pipeline
 /// that silently drops 3% of its rows produces a backtest that looks fine and
 /// is quietly wrong.
-#[derive(Debug, Default)]
-pub struct ValidationReport {
-    pub accepted: Vec<PriceBar>,
-    pub rejected: Vec<(PriceBar, Reject)>,
+/// Generic over the row type so the adjusted and as-traded batches share one
+/// report rather than growing a near-identical copy each. The default keeps
+/// every existing `ValidationReport` spelling working unchanged.
+#[derive(Debug)]
+pub struct ValidationReport<T = PriceBar> {
+    pub accepted: Vec<T>,
+    pub rejected: Vec<(T, Reject)>,
 }
 
-impl ValidationReport {
+// Hand-written rather than derived: `#[derive(Default)]` would demand
+// `T: Default`, which neither bar type has any reason to implement.
+impl<T> Default for ValidationReport<T> {
+    fn default() -> Self {
+        ValidationReport {
+            accepted: Vec::new(),
+            rejected: Vec::new(),
+        }
+    }
+}
+
+impl<T> ValidationReport<T> {
     pub fn rejection_rate(&self) -> f64 {
         let total = self.accepted.len() + self.rejected.len();
         if total == 0 {

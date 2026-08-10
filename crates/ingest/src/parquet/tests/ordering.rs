@@ -44,7 +44,10 @@ fn t7_a_shuffled_batch_writes_in_one_known_order() {
         cik_low.clone(),
         sharadar_other.clone(),
     ];
-    assert_eq!(write_prices(shuffled, &path).expect("write"), 8);
+    assert_eq!(
+        write_prices(shuffled, &path, "synthetic").expect("write"),
+        8
+    );
 
     // Written out rather than computed, so a change to the sort has to be
     // acknowledged here rather than silently agreeing with itself.
