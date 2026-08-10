@@ -72,6 +72,23 @@ Tests written to cover a bug just fixed deserve this most, since they were
 written by someone who already knew the answer. Two tests here passed **because**
 of the bug they were meant to catch, and so defended it on every run.
 
+### Agreement on a broken answer beats agreement on the right one
+
+When a value is checked against an independent implementation, agreement on
+the correct answer is the weak form of the evidence. Two implementations can
+share an assumption, and a tolerance can be loose enough that both pass
+regardless. The strong form is agreement about a deliberately broken answer.
+Introduce a defect into the code under test, have the oracle predict what
+that defect should produce, and confirm the two wrong numbers match.
+Matching on the mutation means the implementations agree about the shape of
+the function, not just one point on it.
+
+First seen here when a deliberately dropped term in the deflated Sharpe
+moved the Rust result to within seven decimals of what SciPy independently
+predicted for the same omission. Cross-checks of this kind are committed
+tests with fixed inputs and expected literals, never one-off runs, so they
+can only pass by matching an external fact.
+
 ## The distinction that defines the slow strand
 
 Time-series prediction of a single asset does not work. Forecasting tomorrow's
