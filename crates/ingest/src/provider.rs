@@ -95,8 +95,10 @@ pub trait PriceSource {
 
     /// The earliest date this source can serve.
     ///
-    /// Free tiers are often windowed rather than ticker-limited — Sharadar's,
-    /// measured directly, serves a rolling five years. Callers need this to
+    /// Subscriptions are often windowed rather than ticker-limited, and the
+    /// window moves when the plan does: Sharadar's free tier measured a rolling
+    /// five years on 2026-08-10, and the paid bundle measured 1997-12-31 the
+    /// same day. Both were measured, neither was claimed. Callers need this to
     /// fail loudly at startup instead of silently training a model on a
     /// truncated history and wondering why the results are thin.
     fn earliest_available(&self) -> Option<Date> {
@@ -131,7 +133,9 @@ pub trait AdjustedPriceSource {
     /// Sharadar's TICKERS table reports a first price date of 2010 for TSLA
     /// while the key in use serves nothing before 2021-08-10. An implementation
     /// here measures the boundary by asking for data, so it can fail, so it
-    /// says so.
+    /// says so. That example was recorded on the free tier on 2026-08-10 and is
+    /// kept because the lesson outlived the plan, not because the dates are
+    /// current.
     ///
     /// `None` means the source served nothing at all, which is different from
     /// an unknown boundary and different again from an error.

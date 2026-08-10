@@ -20,6 +20,7 @@ pub mod parquet;
 pub mod provider;
 pub mod schema;
 pub mod sharadar;
+pub mod universe;
 
 pub use actions::{
     ActionRecord, ActionReject, Convention, CorporateAction, Delisting, DelistingReason,
@@ -42,3 +43,7 @@ pub use schema::{
     AssetKey, CloseKind, PermanentId, PriceBar, Reject, SessionScope, ValidationReport,
     validate_batch,
 };
+// `universe::select` is deliberately not re-exported flat. A bare `select` at
+// the crate root says nothing about what is being selected, and the two callers
+// that want it read better spelling out `universe::select`.
+pub use universe::{FetchOutcome, UniverseEntry, UniverseError};

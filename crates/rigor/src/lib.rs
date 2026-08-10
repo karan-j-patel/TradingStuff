@@ -38,11 +38,13 @@
 //! - [`log`] reads, verifies, and extends the file.
 //! - [`threshold`] turns a trial count into the Sharpe a result has to clear.
 
+pub mod dsr;
 pub mod entry;
 pub mod error;
 pub mod log;
 pub mod threshold;
 
+pub use dsr::{DeflatedSharpe, Moments, benchmark_sharpe, moments, normal_cdf, normal_quantile};
 pub use entry::{ConfigHash, TrialEntry, ZERO_HASH, hash_bytes};
 pub use error::TrialError;
 pub use log::{DEFAULT_PATH, TrialLog};

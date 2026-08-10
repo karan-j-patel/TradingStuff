@@ -317,6 +317,52 @@ impl SharadarClient {
         require_rows(native_tables::TICKERS, &format!("ticker={joined}"), kept)
     }
 
+    /// Every security in the master with equity price coverage.
+    ///
+    /// # Why the whole table rather than a list of names
+    ///
+    /// A universe assembled from tickers somebody typed is survivorship biased
+    /// by construction, because the person typing already knows which companies
+    /// still exist. *Survivorship bias* is the error of measuring only the
+    /// survivors and reading the result as though it described everyone.
+    /// `CLAUDE.md` rule 4 forbids it, and the only way to satisfy the rule is to
+    /// start from every name the vendor has, delisted ones included, and cut it
+    /// down by a rule that does not know the answer.
+    ///
+    /// So nothing here filters on `isdelisted` or `lastpricedate`. Whoever
+    /// samples this list decides what to keep, and that decision is recorded.
+    ///
+    /// # The `table` parameter, and why correctness does not depend on it
+    ///
+    /// One security appears once per vendor table it belongs to, so the master
+    /// is several times longer than the number of securities in it. The
+    /// parameter asks the host to send only the equity-coverage rows. Whether
+    /// it honours that is not something this function needs to know:
+    /// [`decode_ticker`] drops every other row anyway, so an ignored parameter
+    /// costs extra pages and returns the same answer.
+    pub fn native_ticker_master(&self) -> Result<Vec<TickerRow>, SourceError> {
+        let params = [
+            ("table", native::EQUITY_TABLE_TAG.to_string()),
+            ("fields", TICKER_FIELDS.to_string()),
+        ];
+
+        // Sorted on `permaticker`, the vendor's unique and unchanging
+        // identifier. Offset pagination has no defined meaning without a stated
+        // order, and `fetch_native` compares whole rows across every boundary.
+        let rows = self.fetch_native(
+            native_tables::TICKERS,
+            &params,
+            "permaticker",
+            decode_ticker,
+        )?;
+
+        require_rows(
+            native_tables::TICKERS,
+            &format!("table={}", native::EQUITY_TABLE_TAG),
+            rows.into_iter().flatten().collect(),
+        )
+    }
+
     /// Fetch price rows for one ticker over an inclusive date window.
     ///
     /// Diagnostic only, as on the other door. Nothing here maps a vendor row
@@ -352,9 +398,9 @@ impl SharadarClient {
     /// head would be thousands of round trips against a host that publishes no
     /// rate limits.
     ///
-    /// The free tier is a rolling window, and `tickers.firstpricedate` reports
-    /// the full history rather than the part the key can see, so the two
-    /// disagree and only this one is actionable.
+    /// `tickers.firstpricedate` reports a security's full history rather than
+    /// the part the key in use can see, so the two disagree whenever the
+    /// subscription is windowed and only this one is actionable.
     pub fn native_earliest_date(&self, ticker: &str) -> Result<Option<Date>, SourceError> {
         check_query_safe("ticker", ticker)?;
         let params = [

@@ -132,6 +132,16 @@ fn ticker_row(table: &str, permaticker: &str, ticker: &str) -> String {
     )
 }
 
+/// A ticker row with the two fields the universe filter reads left free.
+///
+/// `delisted` is the wire spelling, `"Y"` or `"N"`, because that is what the
+/// decoder is strict about and a bool here would hide the strictness.
+fn master_row(permaticker: &str, ticker: &str, delisted: &str, first_price: &str) -> String {
+    format!(
+        r#"{{"table":"{WIRE_STOCKS}","permaticker":"{permaticker}","ticker":"{ticker}","name":"Fabricated Holdings Inc","exchange":"NASDAQ","category":"Domestic Common Stock","isdelisted":"{delisted}","firstpricedate":"{first_price}","lastpricedate":"2026-08-07"}}"#
+    )
+}
+
 fn date(text: &str) -> Date {
     Date::from_str(text).expect("valid fixture date")
 }
@@ -639,5 +649,111 @@ fn p7_the_native_door_makes_one_attempt_one_wait_one_more() {
         fake.calls(),
         2,
         "one long wait and one retry, never a burst of fast ones"
+    );
+}
+
+// --- N8: the whole security master, for building a universe ----------------
+//
+// The universe these rows feed is the reason rule 4 is satisfiable at all. A
+// hand-picked ticker list is survivorship-biased by construction, because the
+// hand doing the picking already knows which companies still exist. So the
+// master is fetched whole and sampled deterministically, and the tests below
+// are about what the fetch must not quietly drop on the way.
+
+#[test]
+fn n8_the_master_fetch_keeps_delisted_securities() {
+    // The entire point of pulling the master rather than naming tickers. A
+    // universe built only from survivors reports the returns of companies
+    // selected for having survived, which is a different and much better
+    // number than the one being asked for.
+    let fake = Fake::serving(
+        WIRE_TICKERS,
+        &[envelope(&[
+            master_row("100", "ALIVE", "N", "2015-01-02"),
+            master_row("101", "GONE", "Y", "2015-01-02"),
+        ])],
+    );
+
+    let rows = client(&fake)
+        .native_ticker_master()
+        .expect("the master fetch succeeds");
+
+    let delisted: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.is_delisted)
+        .map(|row| row.asset.ticker.as_str())
+        .collect();
+    assert_eq!(
+        delisted,
+        ["GONE"],
+        "a delisted security was dropped, which is survivorship bias entering at the source"
+    );
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn n8_the_master_fetch_keeps_only_equity_coverage_rows() {
+    // TICKERS keys on (table, permaticker, ticker), so one security appears
+    // once per table it belongs to. Keeping the others would multiply the
+    // universe by the number of tables each name is in.
+    let fake = Fake::serving(
+        WIRE_TICKERS,
+        &[envelope(&[
+            ticker_row("fundamentals", "100", "DUPE"),
+            ticker_row(WIRE_STOCKS, "100", "DUPE"),
+            ticker_row("sf3", "100", "DUPE"),
+        ])],
+    );
+
+    let rows = client(&fake)
+        .native_ticker_master()
+        .expect("the master fetch succeeds");
+
+    assert_eq!(rows.len(), 1, "one security must appear once");
+    assert_eq!(rows[0].asset.permanent, Some(PermanentId::Sharadar(100)));
+}
+
+#[test]
+fn n8_the_master_fetch_walks_every_page() {
+    // Page size three with a one-row overlap, the same shape the price walk
+    // uses. A master fetch that stopped at the first page would build a
+    // universe out of whichever names sort first, which is not a sample.
+    let page_one = envelope(&[
+        master_row("100", "AAA", "N", "2015-01-02"),
+        master_row("101", "BBB", "N", "2015-01-02"),
+        master_row("102", "CCC", "N", "2015-01-02"),
+    ]);
+    let page_two = envelope(&[
+        master_row("102", "CCC", "N", "2015-01-02"),
+        master_row("103", "DDD", "N", "2015-01-02"),
+    ]);
+    let fake = Fake::serving(WIRE_TICKERS, &[page_one, page_two]);
+
+    let rows = client(&fake)
+        .with_page_size(3)
+        .native_ticker_master()
+        .expect("a clean walk succeeds");
+
+    let tickers: Vec<&str> = rows.iter().map(|row| row.asset.ticker.as_str()).collect();
+    assert_eq!(tickers, ["AAA", "BBB", "CCC", "DDD"]);
+    assert_eq!(fake.calls(), 2);
+}
+
+#[test]
+fn n8_an_empty_master_is_an_error_rather_than_an_empty_universe() {
+    // This host answers a wrong-case table name with HTTP 200 and no rows, so
+    // an empty master is indistinguishable from a typo unless somebody insists
+    // on the difference. An empty universe would otherwise reach the engine as
+    // a backtest over nothing.
+    let fake = Fake::serving("something-else", &[envelope(&[])]);
+
+    let error = client(&fake)
+        .native_ticker_master()
+        .expect_err("an empty master must not read as success");
+
+    assert!(matches!(error, SourceError::Malformed { .. }));
+    assert!(
+        error.to_string().contains(WIRE_TICKERS),
+        "the error must name the table: {error}"
     );
 }

@@ -37,8 +37,9 @@ use clap::Subcommand;
 use ingest::parquet::{
     actions_path, delistings_path, prices_path, write_actions, write_delistings, write_prices,
 };
-use ingest::provider::{AdjustedPriceSource, DateRange};
+use ingest::provider::{AdjustedPriceSource, DateRange, SourceError};
 use ingest::sharadar::SharadarClient;
+use ingest::universe::{self, FetchOutcome};
 use ingest::{
     ActionRecord, AdjustedBar, AssetKey, Delisting, validate_action, validate_adjusted,
     validate_delisting,
@@ -64,6 +65,13 @@ pub enum Dataset {
         /// Tickers to fetch, comma separated. Only with --fetch
         #[arg(long, value_delimiter = ',')]
         tickers: Vec<String>,
+        /// Universe file to fetch, as written by `ingest fetch-universe`.
+        ///
+        /// Fetches one security at a time and tolerates a vendor declining
+        /// any one of them, which `--tickers` does not. The file is rewritten
+        /// afterwards with what each name actually returned
+        #[arg(long, conflicts_with = "tickers")]
+        universe: Option<String>,
         /// First date to fetch, inclusive. Only with --fetch
         #[arg(long)]
         from: Option<Date>,
@@ -99,12 +107,21 @@ pub fn run(dataset: &Dataset) -> anyhow::Result<ExitCode> {
             input,
             fetch,
             tickers,
+            universe,
             from,
             to,
             data_root,
         } => {
             let root = ingest::parquet::data_root(data_root.as_deref());
             let path = prices_path(&root);
+
+            if let Some(universe) = universe {
+                if !*fetch {
+                    anyhow::bail!("--universe describes what to fetch, so it needs --fetch");
+                }
+                return curate_from_universe(universe, *from, *to, &path);
+            }
+
             let (bars, source) = if *fetch {
                 fetch_prices(tickers, *from, *to)?
             } else {
@@ -164,6 +181,144 @@ fn fetch_prices(
         source.fetch_adjusted(&assets, range)?,
         source.name().to_string(),
     ))
+}
+
+/// Fetch every security in a universe file, one at a time, and curate the lot.
+///
+/// # Why this is not `--tickers` with a longer list
+///
+/// Two differences, and both are the reason the universe file exists.
+///
+/// The identity survives. A universe entry carries the vendor's permanent
+/// identifier, and `--tickers` cannot: it builds an [`AssetKey`] from a string,
+/// so the curated rows would be keyed on a label that companies change. See
+/// [`ingest::AssetKey`] for what that costs.
+///
+/// One security declining does not lose the other six hundred. `fetch_adjusted`
+/// over a list is all or nothing, which is the right behaviour when a caller
+/// named the securities it wants and the wrong behaviour when the list came
+/// from a rule. A name the vendor will not serve is a fact about the data, so it
+/// is recorded against that name and the fetch continues.
+///
+/// # What is deliberately not tolerated
+///
+/// A rejected credential. That is one fault affecting every security, and
+/// carrying on would spend an hour writing "declined" beside six hundred names
+/// that were never asked properly. It stops on the first one.
+fn curate_from_universe(
+    universe_path: &str,
+    from: Option<Date>,
+    to: Option<Date>,
+    prices_path: &Path,
+) -> anyhow::Result<ExitCode> {
+    let (from, to) = match (from, to) {
+        (Some(from), Some(to)) => (from, to),
+        _ => anyhow::bail!("--fetch needs --from and --to"),
+    };
+    let range = DateRange::new(from, to)?;
+
+    let text = std::fs::read_to_string(universe_path)
+        .with_context(|| format!("reading {universe_path}"))?;
+    let mut entries = universe::from_jsonl(&text)?;
+    if entries.is_empty() {
+        anyhow::bail!("{universe_path} holds no securities, so there is nothing to fetch");
+    }
+
+    let source = SharadarClient::native_from_env()?;
+    println!(
+        "Fetching {} securities from {} for {from} to {to}",
+        entries.len(),
+        source.name()
+    );
+    if let Some(earliest) = source.earliest_available()? {
+        println!("  provider serves from {earliest} (measured, not claimed)");
+    }
+    println!("  serial, one security at a time, and a decline is recorded rather than fatal");
+    println!();
+
+    let mut bars: Vec<AdjustedBar> = Vec::new();
+    let mut declined = 0usize;
+    let total = entries.len();
+
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let position = index + 1;
+        let ticker = entry.asset.ticker.clone();
+
+        match source.fetch_adjusted(std::slice::from_ref(&entry.asset), range) {
+            Ok(fetched) => {
+                // The dates are read off what arrived rather than off the
+                // request, because a security delisted mid-window returns a
+                // shorter series and that is exactly what needs recording.
+                let span = fetched
+                    .iter()
+                    .map(|bar| bar.date)
+                    .min()
+                    .zip(fetched.iter().map(|bar| bar.date).max());
+                match span {
+                    Some((first, last)) => {
+                        println!(
+                            "  [{position}/{total}] {ticker}: {} bars, {first} to {last}",
+                            fetched.len()
+                        );
+                        entry.outcome = Some(FetchOutcome::Served {
+                            bars: fetched.len(),
+                            first,
+                            last,
+                        });
+                        bars.extend(fetched);
+                    }
+                    // The source refuses an empty answer, so this is
+                    // unreachable through the Sharadar path and is still not
+                    // silently treated as a success.
+                    None => {
+                        declined += 1;
+                        println!("  [{position}/{total}] {ticker}: the vendor served no rows");
+                        entry.outcome = Some(FetchOutcome::Declined {
+                            reason: "the vendor served no rows".to_string(),
+                        });
+                    }
+                }
+            }
+            Err(SourceError::Unauthorized { provider }) => {
+                anyhow::bail!(
+                    "{provider} rejected the credentials at security {position} of {total}, so \
+                     every remaining fetch would fail the same way. Nothing was written."
+                );
+            }
+            Err(error) => {
+                declined += 1;
+                println!("  [{position}/{total}] {ticker}: DECLINED, {error}");
+                entry.outcome = Some(FetchOutcome::Declined {
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+
+    println!();
+    let outcome = curate_prices(bars, prices_path, source.name())?;
+
+    // Written after the prices, so a universe file claiming data landed is
+    // never left behind by a run whose curated write failed.
+    std::fs::write(universe_path, universe::to_jsonl(&entries)?)
+        .with_context(|| format!("rewriting {universe_path}"))?;
+
+    println!();
+    println!("Universe outcomes");
+    println!("  served:   {}", entries.len() - declined);
+    println!("  declined: {declined}");
+    println!("  recorded in {universe_path}");
+    if declined > 0 {
+        println!();
+        println!("Declined securities, with the vendor's reason:");
+        for entry in entries.iter() {
+            if let Some(FetchOutcome::Declined { reason }) = &entry.outcome {
+                println!("  {:<10} {reason}", entry.asset.ticker);
+            }
+        }
+    }
+
+    Ok(outcome)
 }
 
 fn curate_prices(bars: Vec<AdjustedBar>, path: &Path, source: &str) -> anyhow::Result<ExitCode> {

@@ -42,7 +42,7 @@ struct Subject {
 }
 
 /// Chosen so both arithmetic regimes appear, and all inside the window the
-/// free key serves.
+/// key serves.
 const SUBJECTS: &[Subject] = &[
     Subject {
         ticker: "GOOG",
@@ -87,8 +87,8 @@ pub fn run() -> anyhow::Result<ExitCode> {
     // Requests are serial and deliberately unhurried. This host publishes no
     // rate limits, so the only safe assumption is that it has one.
     match client.native_earliest_date("TSLA")? {
-        Some(earliest) => println!("Free-key window: earliest TSLA row served is {earliest}"),
-        None => println!("Free-key window: no TSLA rows served at all"),
+        Some(earliest) => println!("Measured window: earliest TSLA row served is {earliest}"),
+        None => println!("Measured window: no TSLA rows served at all"),
     }
     println!();
 

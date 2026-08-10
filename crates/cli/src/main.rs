@@ -7,11 +7,12 @@
 //! Four commands today.
 //!
 //! - `status` reports what the trial log says and what the gates permit.
-//! - `backtest` records a trial, then admits there is no engine to run.
+//! - `backtest` runs the engine and records a trial whatever it produced.
 //! - `ingest` reports which data providers this machine is configured for.
 //! - `curate` writes validated records to Parquet, and counts no trial for it.
 //!   Three datasets: prices, delistings, and corporate actions.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -54,7 +55,10 @@ enum Command {
         program: Option<String>,
     },
 
-    /// Record a trial in the log, which happens before anything else runs
+    /// Run a backtest and record the trial, which happens on every path
+    ///
+    /// Either `--config`, for a configuration put forward with no engine behind
+    /// it, or `--prices` together with `--universe` to run the momentum engine.
     Backtest {
         #[arg(long, default_value = rigor::DEFAULT_PATH, help = TRIAL_LOG_HELP)]
         trials: String,
@@ -62,10 +66,17 @@ enum Command {
         /// letters, digits, and - _ . only, at most 64 characters
         #[arg(long)]
         program: String,
-        /// The strategy configuration, hashed into the log. Free text for now,
-        /// and the serialised config of a real engine once one exists
-        #[arg(long)]
-        config: String,
+        /// A strategy configuration with no engine behind it, hashed into the
+        /// log. Records the attempt and reports no Sharpe
+        #[arg(long, conflicts_with_all = ["prices", "universe"])]
+        config: Option<String>,
+        /// Curated price Parquet the momentum engine reads
+        #[arg(long, requires = "universe")]
+        prices: Option<PathBuf>,
+        /// Universe JSONL. Its SHA-256 goes into the configuration hash, and
+        /// its members are the only securities the run may see
+        #[arg(long, requires = "prices")]
+        universe: Option<PathBuf>,
     },
 
     /// Report which data providers this machine is configured for
@@ -95,7 +106,10 @@ fn main() -> ExitCode {
             trials,
             program,
             config,
-        } => backtest::run(&trials, &program, &config),
+            prices,
+            universe,
+        } => backtest::Strategy::from_args(config.as_deref(), prices.as_ref(), universe.as_ref())
+            .and_then(|strategy| backtest::run(&trials, &program, &strategy)),
         Command::Ingest { action } => ingest::run(action.as_ref()),
         Command::Curate { dataset } => curate::run(&dataset),
     };

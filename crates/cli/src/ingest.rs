@@ -25,6 +25,7 @@ use std::process::ExitCode;
 use clap::Subcommand;
 
 mod probe;
+mod universe;
 
 /// What `ingest` can do beyond reporting presence.
 ///
@@ -37,6 +38,18 @@ pub enum Action {
     /// Reads a handful of rows and prints them. Writes nothing, counts no
     /// trial, and draws no conclusion.
     ProbeSep,
+
+    /// Build the research universe from the whole security master
+    ///
+    /// Applies a deterministic sample rule to every security the vendor has,
+    /// delisted ones included, and writes the result as JSONL. Fetches no
+    /// prices and counts no trial.
+    FetchUniverse {
+        /// Where to write the universe. Belongs under data/, which is
+        /// gitignored
+        #[arg(long)]
+        out: String,
+    },
 }
 
 /// A provider and the variables it needs, mirroring `.env.example`.
@@ -85,6 +98,7 @@ const UNCHOSEN: &[(&str, &str)] = &[(
 pub fn run(action: Option<&Action>) -> anyhow::Result<ExitCode> {
     match action {
         Some(Action::ProbeSep) => return probe::run(),
+        Some(Action::FetchUniverse { out }) => return universe::run(out),
         None => {}
     }
 

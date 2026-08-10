@@ -558,6 +558,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "engine",
  "ingest",
  "jiff",
  "rigor",
@@ -698,6 +699,19 @@ dependencies = [
  "block-buffer",
  "const-oid",
  "crypto-common",
+]
+
+[[package]]
+name = "engine"
+version = "0.1.0"
+dependencies = [
+ "ingest",
+ "jiff",
+ "rigor",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
