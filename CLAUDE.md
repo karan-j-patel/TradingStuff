@@ -145,7 +145,8 @@ Hot paths allocate nothing. Money and quantities use `Decimal`, never `f64`.
 Reserved for what has no good Rust path.
 
 - Gradient boosting and neural networks.
-- The local LLM text feature pipeline.
+- The text feature pipeline, dictionary and encoder models first, a
+  generative model only where a feature demands reasoning.
 - Notebooks and plotting.
 
 ### Data sources
@@ -321,8 +322,11 @@ A test suite that has never failed is decorative. Prove it can fail.
 6. **ML.** Ridge baseline, then GBM, then neural net. Each must beat the one
    before it net of costs.
 7. **Microstructure prediction experiment.** Adjudicated by the rigor layer.
-8. **Text features.** Local LLM over filings and transcripts, as numeric
-   features only.
+8. **Text features.** Dictionary and encoder models over filings and
+   transcripts, as numeric features only. Loughran-McDonald is the
+   mandatory baseline, encoder models such as FinBERT are measured
+   against it, and a generative model enters only for a feature neither
+   can express, scored against both.
 9. **Paper trade.** Alpaca, six to twelve months. Log every divergence.
 
 ## Before making the repository public
