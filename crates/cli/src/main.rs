@@ -69,7 +69,13 @@ enum Command {
     },
 
     /// Report which data providers this machine is configured for
-    Ingest,
+    ///
+    /// With no action it reports presence and nothing else. `probe-sep` reads a
+    /// few vendor rows and prints them.
+    Ingest {
+        #[command(subcommand)]
+        action: Option<ingest::Action>,
+    },
 
     /// Write validated records to a curated Parquet file
     ///
@@ -90,7 +96,7 @@ fn main() -> ExitCode {
             program,
             config,
         } => backtest::run(&trials, &program, &config),
-        Command::Ingest => ingest::run(),
+        Command::Ingest { action } => ingest::run(action.as_ref()),
         Command::Curate { dataset } => curate::run(&dataset),
     };
 

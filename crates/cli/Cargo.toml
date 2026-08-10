@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 ingest = { path = "../ingest" }
+jiff.workspace = true
 rigor = { path = "../rigor" }
 rust_decimal.workspace = true
 serde.workspace = true

@@ -22,6 +22,23 @@
 
 use std::process::ExitCode;
 
+use clap::Subcommand;
+
+mod probe;
+
+/// What `ingest` can do beyond reporting presence.
+///
+/// An optional subcommand rather than a replacement, so bare `ingest` keeps
+/// meaning what it has always meant.
+#[derive(Debug, Subcommand)]
+pub enum Action {
+    /// Report what SEP ships around known split dates
+    ///
+    /// Reads a handful of rows and prints them. Writes nothing, counts no
+    /// trial, and draws no conclusion.
+    ProbeSep,
+}
+
 /// A provider and the variables it needs, mirroring `.env.example`.
 ///
 /// `.env.example` is the committed template and stays blank. If a name changes
@@ -65,7 +82,12 @@ const UNCHOSEN: &[(&str, &str)] = &[(
     "no vendor chosen, and Alpaca's free tier is IEX only which is unusable for microstructure work",
 )];
 
-pub fn run() -> anyhow::Result<ExitCode> {
+pub fn run(action: Option<&Action>) -> anyhow::Result<ExitCode> {
+    match action {
+        Some(Action::ProbeSep) => return probe::run(),
+        None => {}
+    }
+
     println!("Environment check. Presence only, values are never printed.");
     println!();
 

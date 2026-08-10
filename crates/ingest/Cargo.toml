@@ -10,4 +10,6 @@ jiff = { workspace = true, features = ["serde"] }
 parquet.workspace = true
 rust_decimal.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 thiserror.workspace = true
+ureq.workspace = true

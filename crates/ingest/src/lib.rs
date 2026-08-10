@@ -18,6 +18,7 @@ pub mod adjust;
 pub mod parquet;
 pub mod provider;
 pub mod schema;
+pub mod sharadar;
 
 pub use actions::{
     ActionRecord, ActionReject, Convention, CorporateAction, Delisting, DelistingReason,

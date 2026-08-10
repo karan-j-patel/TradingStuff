@@ -21,8 +21,27 @@ jiff = { version = "0.2.35", features = ["serde"] }
 # `maths` supplies `sqrt` and `checked_ln` on Decimal. The trial-count threshold
 # needs both and the alternative was routing them through f64, which this
 # project does not do for numbers that decide anything.
-rust_decimal = { version = "1.42.1", features = ["maths", "serde-with-str"] }
+rust_decimal = { version = "1.42.1", features = [
+    "maths",
+    "serde-with-str",
+    "serde-with-arbitrary-precision",
+] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+# `arbitrary_precision` keeps a JSON number as the exact text the vendor sent
+# instead of routing it through f64 on the way into `serde_json::Value`. The
+# Sharadar decoder parses that text straight into `Decimal`, which is the only
+# way an 18-significant-digit price survives the trip. It is a workspace-level
+# feature because cargo unifies features across the graph, so enabling it in one
+# crate enables it everywhere and pretending otherwise would hide the blast
+# radius. The trial log in `rigor` is unaffected: every field it serialises is a
+# string or null, so it has no numeric token for this feature to touch.
+serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
 sha2 = "0.11.0"
 thiserror = "2.0.19"
+# Blocking by design. Nothing in this system has a concurrency requirement that
+# justifies async, and an HTTP client is the place that assumption gets tested
+# first. Default features are `rustls` and `gzip`, which is TLS plus response
+# compression and nothing else. `json` is deliberately left off: the Sharadar
+# decoder needs the raw numeric token rather than a parsed value, so it drives
+# serde_json itself.
+ureq = "3.4.0"

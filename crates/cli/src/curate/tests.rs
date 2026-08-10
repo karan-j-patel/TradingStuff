@@ -14,6 +14,55 @@ const ONE_ANONYMOUS_BAR: &str = r#"{"asset":{"ticker":"ZZZZ","permanent":null},"
 /// `high` below `low`, which `PriceBar::validate` rejects.
 const ONE_INVALID_BAR: &str = r#"{"asset":{"ticker":"BAD","permanent":null},"date":"2020-01-03","open":"10.00","high":"9.00","low":"11.00","close":"10.50","volume":"5","session":"RegularHours","close_kind":"ClosingAuction"}"#;
 
+/// The same bar twice: numeric fields as bare JSON numbers, then as quoted
+/// strings. Every other fixture here quotes its decimals, which left the bare
+/// form untested even though it is the form an operator is most likely to
+/// write and the one `serde_json`'s `arbitrary_precision` breaks without
+/// rust_decimal's `serde-with-arbitrary-precision` to match it.
+///
+/// `high` carries 18 significant digits, which is past what f64 holds, so this
+/// also pins that the value arrives exactly rather than nearly.
+const ONE_BARE_NUMBER_BAR: &str = r#"{"asset":{"ticker":"AAPL","permanent":{"Sharadar":199059}},"date":"2020-01-02","open":10.25,"high":123456789.012345678,"low":10.10,"close":10.75,"volume":1000,"session":"RegularHours","close_kind":"ClosingAuction"}"#;
+
+/// Same values, quoted. A different date only because the writer refuses two
+/// rows for one security on one day, which is a guarantee worth not weakening
+/// for a test's convenience.
+const ONE_QUOTED_NUMBER_BAR: &str = r#"{"asset":{"ticker":"AAPL","permanent":{"Sharadar":199059}},"date":"2020-01-03","open":"10.25","high":"123456789.012345678","low":"10.10","close":"10.75","volume":"1000","session":"RegularHours","close_kind":"ClosingAuction"}"#;
+
+/// Bare JSON numbers reach `PriceBar` intact, and agree with the quoted form.
+///
+/// This is the path the connector work found broken: serde_json hands a bare
+/// *float* to a deserializer as a magic map rather than as a number, so
+/// `Decimal` refuses it unless rust_decimal carries the matching feature. Bare
+/// integers were unaffected, which is why `permanent` kept working and nothing
+/// in this file noticed.
+#[test]
+fn a_bare_json_number_curates_identically_to_its_quoted_twin() {
+    let dir = scratch("bare-numbers");
+    let input = jsonl(&dir, &[ONE_BARE_NUMBER_BAR, ONE_QUOTED_NUMBER_BAR]);
+
+    let dataset = Dataset::Prices {
+        input,
+        data_root: Some(dir.to_string_lossy().into_owned()),
+    };
+    let code = run(&dataset).expect("bare JSON numbers are a valid way to write a bar");
+    assert_eq!(code, ExitCode::SUCCESS);
+
+    let bars = read_prices(&prices_path(&dir)).expect("the curated file reads back");
+    assert_eq!(bars.len(), 2);
+    let prices = |bar: &ingest::PriceBar| (bar.open, bar.high, bar.low, bar.close, bar.volume);
+    assert_eq!(
+        prices(&bars[0]),
+        prices(&bars[1]),
+        "the bare and quoted spellings of one bar produced different numbers"
+    );
+    assert_eq!(
+        bars[0].high,
+        rust_decimal::Decimal::from_str_exact("123456789.012345678").unwrap(),
+        "18 significant digits did not survive the JSONL path"
+    );
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("curate-cli-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
