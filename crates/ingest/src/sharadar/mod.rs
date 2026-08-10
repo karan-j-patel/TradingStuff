@@ -2,15 +2,29 @@
 //!
 //! # Which API this is, because there are two
 //!
-//! Sharadar data is served by two live and mutually incompatible APIs. This
-//! module targets `data.nasdaq.com/api/v3/datatables/SHARADAR/{TABLE}.json`,
-//! which is the one with documented cursor pagination, bulk export, and
-//! published quotas. Sharadar's own `api.sharadar.com` uses different table
-//! names, a different parameter scheme, and in at least one load-bearing case a
-//! different column name for the same field: what Nasdaq calls `datekey`
-//! Sharadar calls `date`. A client written against one and pointed at the other
-//! picks up the wrong column and says nothing, which is why only one of them is
-//! spoken here.
+//! Sharadar data is served by two live and mutually incompatible APIs, and this
+//! module speaks both.
+//!
+//! - `data.nasdaq.com/api/v3/datatables/SHARADAR/{TABLE}.json`, documented in
+//!   the rest of this file, with cursor pagination and published quotas.
+//! - `api.sharadar.com/v1.0/data/{table}`, in [`native`], with keyed rows and
+//!   offset pagination.
+//!
+//! Which door a key opens is a property of the subscription rather than a
+//! preference. A key issued by sharadar.com is anonymous at Nasdaq, and the
+//! symptom is a rate limit rather than an authentication error, which is a
+//! considerable distance from the cause.
+//!
+//! The two hosts disagree in ways that produce no error when confused: table
+//! names differ in spelling and case, the `table` tag for equity coverage is
+//! `SEP` on one and `stocks` on the other, and what Nasdaq calls `datekey`
+//! Sharadar calls `date`. Every one of those lives in [`columns`] rather than at
+//! a call site, because each is a silent wrong answer rather than a failure.
+//!
+//! What the two share is the safety core: one transport, one retry and status
+//! classification, one pair of credential defences, and one reader turning a
+//! JSON token into a `Decimal`. There is deliberately no second copy of any of
+//! them.
 //!
 //! # The shape of a response, and the bug it invites
 //!
@@ -58,15 +72,64 @@ use std::time::Duration;
 mod client;
 mod decode;
 mod http;
+pub mod native;
 mod sep;
 mod tickers;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_native;
 
 pub use client::SharadarClient;
 pub use sep::SepRow;
 pub use tickers::TickerRow;
+
+/// Column and table names that differ between the two doors.
+///
+/// Single-sourced here rather than spelled at call sites, because the two
+/// hosts disagree in ways that produce no error when confused. The SF1 filing
+/// date is `datekey` on the datatables endpoint and `date` on the native one:
+/// same field, same type, different name, and a client that reads the wrong one
+/// gets a missing column at best and a different date at worst. Table names are
+/// worse still, because the native host answers a wrong-case name with an empty
+/// result rather than an error.
+pub(crate) mod columns {
+    /// Names as the Nasdaq datatables endpoint spells them.
+    pub(crate) mod datatables {
+        /// The `table` value marking equity price coverage in TICKERS.
+        pub(crate) const EQUITY_TABLE_TAG: &str = "SEP";
+        /// The date a filing became public.
+        ///
+        /// Unused until a fundamentals fetch lands on this door, and defined
+        /// now anyway: the pair is the point. A constant that appears only when
+        /// its first caller does is a constant somebody invents inline instead,
+        /// which is how the two spellings get confused. Locked by test against
+        /// its native counterpart.
+        #[allow(dead_code)]
+        pub(crate) const FILING_DATE: &str = "datekey";
+    }
+
+    /// Names as `api.sharadar.com` spells them. Verified live, 2026-08-09.
+    pub(crate) mod native {
+        /// The `table` value marking equity price coverage. Observed live: the
+        /// native host returns `stocks` here where the datatables host returns
+        /// `SEP`, so the round-1 filter constant does not carry over.
+        pub(crate) const EQUITY_TABLE_TAG: &str = "stocks";
+        /// The same field the datatables host calls `datekey`.
+        pub(crate) const FILING_DATE: &str = "date";
+    }
+
+    /// Native table names, lowercase.
+    ///
+    /// A wrong-case name is answered with an empty result rather than an error,
+    /// so these exist once and are never spelled at a call site.
+    pub(crate) mod native_tables {
+        pub(crate) const STOCKS: &str = "stocks";
+        pub(crate) const TICKERS: &str = "tickers";
+        pub(crate) const FUNDAMENTALS: &str = "fundamentals";
+    }
+}
 
 /// The name this connector reports in errors and in stored provenance.
 pub const PROVIDER: &str = "Sharadar";
@@ -96,6 +159,30 @@ const MAX_ATTEMPTS: u32 = 3;
 /// Real in production and zero under test, which is what keeps the retry path
 /// deterministic and instant to exercise. See [`SharadarClient::with_transport`].
 const RETRY_PAUSE: Duration = Duration::from_millis(500);
+
+/// Where the native API lives. See [`native`] for how it differs.
+const NATIVE_BASE_URL: &str = "https://api.sharadar.com/v1.0/data";
+
+/// The native door gets one attempt, one wait, one more, and then fails.
+///
+/// This host publishes no rate limits, so the only safe assumption is that it
+/// has one nobody can see. Round 1 measured what the alternative costs: three
+/// attempts half a second apart against a speed limit turned a throttle into a
+/// disabled account, because each retry was itself another offence.
+const NATIVE_MAX_ATTEMPTS: u32 = 2;
+
+/// Long enough to be worth waiting, rather than long enough to be polite about.
+///
+/// A throttle measured in seconds is cleared by a wait measured in seconds; one
+/// measured in minutes is not, and there is no way to tell which this host uses.
+const NATIVE_RETRY_PAUSE: Duration = Duration::from_secs(120);
+
+/// Rows requested per native page.
+///
+/// Polite rather than maximal. This host publishes no limits, and a smaller
+/// page costs one extra round trip while a larger one costs goodwill that
+/// cannot be measured until it is gone.
+const NATIVE_PAGE_SIZE: usize = 1_000;
 
 /// Cap on how much of a failing response body is quoted back in an error.
 ///

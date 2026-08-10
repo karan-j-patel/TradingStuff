@@ -82,7 +82,7 @@ fn decode_row(row: &super::decode::RowReader<'_>) -> Result<Option<TickerRow>, S
     // and so on. Keeping every row would multiply each security by the number
     // of tables it is in, and a load keyed on permaticker alone would instead
     // collapse them and lose whichever arrived first.
-    if row.text("table")? != "SEP" {
+    if row.text("table")? != super::columns::datatables::EQUITY_TABLE_TAG {
         return Ok(None);
     }
 

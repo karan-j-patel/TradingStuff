@@ -29,7 +29,8 @@ use std::time::Duration;
 use super::decode::{Page, RowReader};
 use super::http::{Http, UreqHttp};
 use super::{
-    BASE_URL, BODY_EXCERPT, KEY_VAR, MAX_ATTEMPTS, MAX_PAGES, PROVIDER, RETRY_PAUSE, refused,
+    BASE_URL, BODY_EXCERPT, KEY_VAR, MAX_ATTEMPTS, MAX_PAGES, NATIVE_BASE_URL, NATIVE_MAX_ATTEMPTS,
+    NATIVE_PAGE_SIZE, NATIVE_RETRY_PAUSE, PROVIDER, RETRY_PAUSE, refused,
 };
 use crate::provider::SourceError;
 
@@ -41,8 +42,18 @@ pub struct SharadarClient {
     /// Split out so tests can point the client at a fixture host without
     /// reaching the network.
     base: String,
+    /// Total attempts per request, the first one included.
+    ///
+    /// Per host, because the two doors publish different limits and deserve
+    /// different manners. The datatables endpoint documents a generous quota
+    /// and gets three quick attempts. The native endpoint publishes no limits
+    /// at all, so it gets one attempt, one long wait, and one more.
+    attempts: u32,
     /// Zero under test, which is what keeps the retry path deterministic.
     pause: Duration,
+    /// Rows per page on the native door. A field so a test can walk a
+    /// boundary with three rows instead of three thousand.
+    page_size: usize,
 }
 
 impl fmt::Debug for SharadarClient {
@@ -80,7 +91,27 @@ impl SharadarClient {
             http: Box::new(UreqHttp::new()),
             key,
             base: BASE_URL.to_string(),
+            attempts: MAX_ATTEMPTS,
             pause: RETRY_PAUSE,
+            page_size: NATIVE_PAGE_SIZE,
+        })
+    }
+
+    /// Build a client for the native `api.sharadar.com` door.
+    ///
+    /// Same key, same safety core, different manners. This host publishes no
+    /// rate limits at all, so the only safe assumption is that it has one and
+    /// we cannot see it. Round 1 established what fast retries do to a speed
+    /// limit: three attempts 0.5 seconds apart turned a throttle into a
+    /// disabled account. So this door retries once, after a wait long enough
+    /// to be worth making.
+    pub fn native_from_env() -> Result<Self, SourceError> {
+        Ok(SharadarClient {
+            base: NATIVE_BASE_URL.to_string(),
+            attempts: NATIVE_MAX_ATTEMPTS,
+            pause: NATIVE_RETRY_PAUSE,
+            page_size: NATIVE_PAGE_SIZE,
+            ..Self::from_env()?
         })
     }
 
@@ -91,10 +122,40 @@ impl SharadarClient {
             http,
             key: key.to_string(),
             base: base.to_string(),
+            attempts: MAX_ATTEMPTS,
             // No sleeping in tests. The retry policy is exercised for its
             // decisions, not for its timing.
             pause: Duration::ZERO,
+            page_size: NATIVE_PAGE_SIZE,
         }
+    }
+
+    /// Shrink the native page size so a boundary is reachable in a fixture.
+    #[cfg(test)]
+    pub(crate) fn with_page_size(mut self, rows: usize) -> Self {
+        self.page_size = rows;
+        self
+    }
+
+    pub(crate) fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    /// One native request. Same retry, same scrubbing, different URL shape.
+    ///
+    /// `format=json` is explicit because this host will otherwise answer in
+    /// whatever it considers its default, and a client that assumes a default
+    /// is one vendor change away from parsing the wrong thing.
+    pub(crate) fn get_native(
+        &self,
+        table: &str,
+        params: &[(&str, String)],
+    ) -> Result<String, SourceError> {
+        let mut url = format!("{}/{table}?api_key={}&format=json", self.base, self.key);
+        for (name, value) in params {
+            url.push_str(&format!("&{name}={value}"));
+        }
+        self.get(&url)
     }
 
     /// Replace the key wherever it appears in text bound for an error.
@@ -127,7 +188,7 @@ impl SharadarClient {
     fn get(&self, url: &str) -> Result<String, SourceError> {
         let mut last = String::from("no attempt was made");
 
-        for attempt in 1..=MAX_ATTEMPTS {
+        for attempt in 1..=self.attempts {
             match self.http.get(url) {
                 Ok(reply) if (200..300).contains(&reply.status) => return Ok(reply.body),
 
@@ -159,15 +220,19 @@ impl SharadarClient {
                 Err(failure) => last = failure.0,
             }
 
-            if attempt < MAX_ATTEMPTS && !self.pause.is_zero() {
-                // Doubling, so three attempts wait 500ms then 1s. Bounded by
-                // MAX_ATTEMPTS rather than by a deadline.
+            if attempt < self.attempts && !self.pause.is_zero() {
+                // Doubling, bounded by the attempt count rather than by a
+                // deadline. On the native door there is only one wait, so the
+                // doubling never comes into play there.
                 std::thread::sleep(self.pause * 2u32.pow(attempt - 1));
             }
         }
 
         Err(self.transport(
-            &format!("giving up after {MAX_ATTEMPTS} attempts, last was {last}"),
+            &format!(
+                "giving up after {} attempts, last was {last}",
+                self.attempts
+            ),
             url,
         ))
     }

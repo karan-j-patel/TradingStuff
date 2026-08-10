@@ -141,23 +141,8 @@ impl RowReader<'_> {
     }
 
     /// The exact text of a cell that holds either a string or a number.
-    ///
-    /// The vendor mixes the two forms within one row: large integers arrive
-    /// quoted while ratios arrive bare. Both are returned as the characters
-    /// that were on the wire, so nothing downstream has to know which form it
-    /// got, and no number passes through `f64` on the way.
     pub(crate) fn token(&self, column: &str) -> Result<&str, SourceError> {
-        match self.cell(column)? {
-            Value::String(text) => Ok(text),
-            // `Number::as_str` exists only because the workspace enables
-            // serde_json's `arbitrary_precision`. Without it this would be a
-            // parsed f64 and the original digits would already be gone.
-            Value::Number(number) => Ok(number.as_str()),
-            other => Err(malformed(format!(
-                "the column {column:?} holds {}, and a string or a number was expected",
-                describe(other)
-            ))),
-        }
+        token_of(column, self.cell(column)?)
     }
 
     /// True when the column is present and holds JSON null.
@@ -167,13 +152,7 @@ impl RowReader<'_> {
 
     /// A column that must hold a string.
     pub(crate) fn text(&self, column: &str) -> Result<&str, SourceError> {
-        match self.cell(column)? {
-            Value::String(text) => Ok(text),
-            other => Err(malformed(format!(
-                "the column {column:?} holds {}, and a string was expected",
-                describe(other)
-            ))),
-        }
+        text_of(column, self.cell(column)?)
     }
 
     /// A column that holds a string or null.
@@ -186,30 +165,12 @@ impl RowReader<'_> {
 
     /// A column that must hold a number, in either the bare or the quoted form.
     pub(crate) fn decimal(&self, column: &str) -> Result<Decimal, SourceError> {
-        let token = self.token(column)?;
-
-        // `from_str_exact` rather than `from_str`. The latter rounds when a
-        // token carries more precision than Decimal can hold, and a price that
-        // silently rounds is indistinguishable from a correct one. Refusing is
-        // the only outcome that stays honest.
-        Decimal::from_str_exact(token)
-            .or_else(|_| Decimal::from_scientific(token))
-            .map_err(|error| {
-                malformed(format!(
-                    "the column {column:?} holds {token:?}, which is not a number \
-                     this crate can hold exactly: {error}"
-                ))
-            })
+        decimal_of(column, self.cell(column)?)
     }
 
     /// A column that must hold an ISO 8601 date.
     pub(crate) fn date(&self, column: &str) -> Result<Date, SourceError> {
-        let text = self.text(column)?;
-        Date::from_str(text).map_err(|error| {
-            malformed(format!(
-                "the column {column:?} holds {text:?}, which is not a calendar date: {error}"
-            ))
-        })
+        date_of(column, self.cell(column)?)
     }
 
     /// A column that holds an ISO 8601 date or null.
@@ -221,8 +182,74 @@ impl RowReader<'_> {
     }
 }
 
+// --- cell-level reading, shared by both doors --------------------------------
+//
+// The two APIs disagree about how a row is shaped: the datatables endpoint
+// sends positional arrays plus a column list, the native one sends keyed
+// objects. They agree completely about how a single *value* is spelled, so
+// these functions are where that agreement lives and there is deliberately no
+// second copy of them on the native path.
+
+/// The exact text of a cell holding either a string or a number.
+///
+/// The vendor mixes the two forms within one row: large integers arrive quoted
+/// while prices arrive bare. Both come back as the characters that were on the
+/// wire, so nothing downstream has to know which form it got, and no number
+/// passes through `f64` on the way.
+pub(crate) fn token_of<'a>(column: &str, value: &'a Value) -> Result<&'a str, SourceError> {
+    match value {
+        Value::String(text) => Ok(text),
+        // `Number::as_str` exists only because the workspace enables
+        // serde_json's `arbitrary_precision`. Without it this would already be
+        // a parsed f64 and the original digits would be gone.
+        Value::Number(number) => Ok(number.as_str()),
+        other => Err(malformed(format!(
+            "the column {column:?} holds {}, and a string or a number was expected",
+            describe(other)
+        ))),
+    }
+}
+
+pub(crate) fn text_of<'a>(column: &str, value: &'a Value) -> Result<&'a str, SourceError> {
+    match value {
+        Value::String(text) => Ok(text),
+        other => Err(malformed(format!(
+            "the column {column:?} holds {}, and a string was expected",
+            describe(other)
+        ))),
+    }
+}
+
+/// Parse a numeric cell into `Decimal` without rounding it.
+///
+/// `from_str_exact` rather than `from_str`, because the latter rounds when a
+/// token carries more precision than `Decimal` holds, and a price that quietly
+/// rounds is indistinguishable from a correct one. The scientific fallback only
+/// runs where the strict parse already refused, and it errors rather than
+/// rounding too.
+pub(crate) fn decimal_of(column: &str, value: &Value) -> Result<Decimal, SourceError> {
+    let token = token_of(column, value)?;
+    Decimal::from_str_exact(token)
+        .or_else(|_| Decimal::from_scientific(token))
+        .map_err(|error| {
+            malformed(format!(
+                "the column {column:?} holds {token:?}, which is not a number \
+                 this crate can hold exactly: {error}"
+            ))
+        })
+}
+
+pub(crate) fn date_of(column: &str, value: &Value) -> Result<Date, SourceError> {
+    let text = text_of(column, value)?;
+    Date::from_str(text).map_err(|error| {
+        malformed(format!(
+            "the column {column:?} holds {text:?}, which is not a calendar date: {error}"
+        ))
+    })
+}
+
 /// Name a JSON value's kind for an error, without quoting the value itself.
-fn describe(value: &Value) -> &'static str {
+pub(crate) fn describe(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
         Value::Bool(_) => "a boolean",
