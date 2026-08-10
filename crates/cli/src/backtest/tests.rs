@@ -226,6 +226,7 @@ fn e7_a_run_appends_one_entry_carrying_the_engine_sharpe() {
         &Strategy::Momentum {
             prices: &prices,
             universe: &universe,
+            actions: None,
         },
     )
     .expect("the momentum backtest runs");
@@ -270,6 +271,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
         &Strategy::Momentum {
             prices: &prices,
             universe: &universe,
+            actions: None,
         },
     )
     .expect("first run");
@@ -293,6 +295,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
         &Strategy::Momentum {
             prices: &prices,
             universe: &universe,
+            actions: None,
         },
     )
     .expect("second run");
@@ -340,6 +343,7 @@ fn an_engine_failure_still_records_a_trial() {
         &Strategy::Momentum {
             prices: &missing,
             universe: &universe,
+            actions: None,
         },
     )
     .expect("a failed engine is still a completed command");
@@ -377,6 +381,7 @@ fn an_unresolvable_configuration_still_records_a_trial() {
         &Strategy::Momentum {
             prices: &missing,
             universe: &missing,
+            actions: None,
         },
     )
     .expect("a failed engine is still a completed command");
@@ -392,19 +397,150 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
     let prices = PathBuf::from("prices.parquet");
     let universe = PathBuf::from("universe.jsonl");
 
+    let actions = PathBuf::from("actions.parquet");
+
     assert!(matches!(
-        Strategy::from_args(Some("free text"), None, None),
+        Strategy::from_args(Some("free text"), None, None, None),
         Ok(Strategy::Declared(_))
     ));
     assert!(matches!(
-        Strategy::from_args(None, Some(&prices), Some(&universe)),
-        Ok(Strategy::Momentum { .. })
+        Strategy::from_args(None, Some(&prices), Some(&universe), None),
+        Ok(Strategy::Momentum { actions: None, .. })
+    ));
+    assert!(matches!(
+        Strategy::from_args(None, Some(&prices), Some(&universe), Some(&actions)),
+        Ok(Strategy::Momentum {
+            actions: Some(_),
+            ..
+        })
     ));
     for bad in [
-        Strategy::from_args(None, None, None),
-        Strategy::from_args(None, Some(&prices), None),
-        Strategy::from_args(Some("free text"), Some(&prices), Some(&universe)),
+        Strategy::from_args(None, None, None, None),
+        Strategy::from_args(None, Some(&prices), None, None),
+        Strategy::from_args(Some("free text"), Some(&prices), Some(&universe), None),
+        // Dividends with no engine behind them. Accepting this would record a
+        // hash saying an actions file was used by a run that never opened one.
+        Strategy::from_args(Some("free text"), None, None, Some(&actions)),
     ] {
         assert!(bad.is_err(), "an impossible combination was accepted");
     }
+}
+
+// --- E8, the dividend wiring at this boundary -------------------------------
+
+/// A curated actions file beside the fixture dataset, with one cash dividend.
+///
+/// Dated inside the panel, on a security the universe holds, so it reaches a
+/// holding return rather than only the unmatched census.
+fn fixture_actions(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("backtest-cli-{name}"));
+    fs::create_dir_all(&dir).expect("creating the fixture directory");
+    let path = dir.join("actions.parquet");
+
+    let record = ingest::ActionRecord {
+        asset: AssetKey {
+            ticker: "AAA".to_string(),
+            permanent: Some(PermanentId::Sharadar(1)),
+        },
+        effective: date(2021, 2, 15),
+        action: ingest::CorporateAction::Dividend {
+            amount: Decimal::from_str_exact("0.5").expect("literal"),
+            kind: ingest::DividendKind::Cash,
+        },
+        source: "Synthetic".to_string(),
+    };
+    ingest::parquet::write_actions(vec![record], &path, "Synthetic")
+        .expect("writing the fixture actions");
+    path
+}
+
+/// E8g. Supplying an actions file moves the recorded hash, and both runs
+/// produce a figure.
+///
+/// Two entries rather than one, because a run with cash dividends and the same
+/// run without are two hypotheses about returns, not one measured twice. If the
+/// hash did not move, the log would record the second run as a repeat of the
+/// first and the deflated Sharpe's denominator would be short by one.
+#[test]
+fn e8g_the_recorded_hash_moves_when_actions_are_supplied() {
+    let path = temp_log("actions-hash");
+    let (prices, universe) = fixture_dataset("actions-hash");
+    let actions = fixture_actions("actions-hash");
+
+    for supplied in [None, Some(&actions)] {
+        let code = run(
+            &path,
+            engine::PROGRAM,
+            &Strategy::Momentum {
+                prices: &prices,
+                universe: &universe,
+                actions: supplied.map(PathBuf::as_path),
+            },
+        )
+        .expect("the momentum backtest runs");
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    let log = TrialLog::load(&path).expect("reload");
+    log.verify().expect("the chain verifies");
+
+    let entries: Vec<_> = log.entries().iter().skip(1).collect();
+    assert_eq!(entries.len(), 2, "each run must record its own trial");
+    assert_ne!(
+        entries[0].config_hash, entries[1].config_hash,
+        "the same hash for a run with dividends and one without would record two \
+         different strategies as a single trial"
+    );
+    assert!(
+        entries.iter().all(|entry| entry.sharpe.is_some()),
+        "both runs must have produced a figure, or the hashes differ for the \
+         uninteresting reason that one of them failed"
+    );
+    assert_ne!(
+        entries[0].sharpe, entries[1].sharpe,
+        "the dividend reached the hash but not the returns"
+    );
+}
+
+/// E8h, CLI half. The printer selects the caveat block on the report's flag.
+///
+/// The engine half, that the two blocks differ in the ways that matter, is in
+/// `crates/engine/src/tests/dividends.rs`. What is only testable here is that
+/// the printer consults the flag at all.
+#[test]
+fn e8h_the_printed_caveats_follow_the_dividend_flag() {
+    let (prices, universe) = fixture_dataset("caveat-flag");
+    let actions = fixture_actions("caveat-flag");
+
+    let text = fs::read_to_string(&universe).expect("read universe");
+    let sha256 = rigor::hash_bytes(text.as_bytes());
+    let bars = ingest::parquet::read_prices(&prices).expect("read prices");
+
+    let without = engine::backtest(
+        &Panel::from_bars(bars.clone()).expect("panel builds"),
+        &BacktestConfig::momentum_v0(&sha256),
+    )
+    .expect("the fixture backtests");
+
+    let records = ingest::parquet::read_actions(&actions).expect("read actions");
+    let with = engine::backtest(
+        &Panel::from_bars(bars)
+            .expect("panel builds")
+            .with_dividends(&records)
+            .expect("dividends attach"),
+        &BacktestConfig {
+            actions_sha256: Some(rigor::hash_bytes(
+                &fs::read(&actions).expect("read actions bytes"),
+            )),
+            ..BacktestConfig::momentum_v0(&sha256)
+        },
+    )
+    .expect("the fixture backtests");
+
+    assert_eq!(report::caveat_block(&without), engine::CAVEATS);
+    assert_eq!(
+        report::caveat_block(&with),
+        engine::CAVEATS_WITH_DIVIDENDS,
+        "the printer published the wrong bias statement beside a real figure"
+    );
 }

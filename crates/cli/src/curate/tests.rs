@@ -274,7 +274,11 @@ fn t12_curate_actions_writes_a_file_the_reader_round_trips() {
     let input = jsonl(&dir, &[SPLIT_ACTION, CASH_DIVIDEND, SPECIAL_DIVIDEND]);
 
     let dataset = Dataset::Actions {
-        input,
+        input: Some(input),
+        fetch: false,
+        universe: None,
+        from: None,
+        to: None,
         data_root: Some(dir.to_string_lossy().into_owned()),
     };
     run(&dataset).expect("curating three valid actions succeeds");
@@ -309,7 +313,11 @@ fn t12_one_invalid_action_fails_the_command_and_writes_nothing() {
     let input = jsonl(&dir, &[SPLIT_ACTION, ZERO_RATIO_ACTION]);
 
     let dataset = Dataset::Actions {
-        input,
+        input: Some(input),
+        fetch: false,
+        universe: None,
+        from: None,
+        to: None,
         data_root: Some(dir.to_string_lossy().into_owned()),
     };
     let error = run(&dataset).expect_err("a zero ratio must fail the command");

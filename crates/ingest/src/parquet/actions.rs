@@ -155,7 +155,17 @@ fn decode_action(
 }
 
 /// Write actions to `path`, returning how many rows landed.
-pub fn write_actions(rows: Vec<ActionRecord>, path: &Path) -> Result<usize, CurateError> {
+///
+/// `source` names the data vendor and is recorded in the file's metadata, the
+/// same way [`super::write_prices`] records it and for the same reason: a
+/// curated file whose vendor is unknown is one nobody can reconcile. There is
+/// deliberately no basis key here. A basis describes how a price series was
+/// adjusted, and these rows are events rather than a series.
+pub fn write_actions(
+    rows: Vec<ActionRecord>,
+    path: &Path,
+    source: &str,
+) -> Result<usize, CurateError> {
     // The writer is the guard. This function is publicly exported, so a caller
     // that never goes through `cli curate` still cannot put a record the domain
     // rejects into a curated file.
@@ -190,7 +200,7 @@ pub fn write_actions(rows: Vec<ActionRecord>, path: &Path) -> Result<usize, Cura
     let mut amount = Vec::with_capacity(count);
     let mut dividend_kind = Vec::with_capacity(count);
     let mut factor = Vec::with_capacity(count);
-    let mut source = Vec::with_capacity(count);
+    let mut row_source = Vec::with_capacity(count);
 
     for (identity, row) in &rows {
         let (kind, row_ratio, row_amount, row_dividend_kind, row_factor) =
@@ -204,7 +214,7 @@ pub fn write_actions(rows: Vec<ActionRecord>, path: &Path) -> Result<usize, Cura
         amount.push(row_amount);
         dividend_kind.push(row_dividend_kind);
         factor.push(row_factor);
-        source.push(row.source.as_str());
+        row_source.push(row.source.as_str());
     }
 
     let batch = RecordBatch::try_new(
@@ -219,7 +229,7 @@ pub fn write_actions(rows: Vec<ActionRecord>, path: &Path) -> Result<usize, Cura
             decimals(amount)?,
             Arc::new(StringArray::from(dividend_kind)),
             decimals(factor)?,
-            Arc::new(StringArray::from(source)),
+            Arc::new(StringArray::from(row_source)),
         ],
     )?;
 
@@ -227,7 +237,7 @@ pub fn write_actions(rows: Vec<ActionRecord>, path: &Path) -> Result<usize, Cura
         let mut writer = ::parquet::arrow::ArrowWriter::try_new(
             file,
             schema(),
-            Some(super::writer_properties(&[])),
+            Some(super::writer_properties(&[(super::SOURCE_KEY, source)])),
         )?;
         writer.write(&batch)?;
         writer.close()?;

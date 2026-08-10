@@ -64,6 +64,13 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
             universe_sha256: "1".repeat(64),
             ..base.clone()
         },
+        // Supplying an actions file changes what the returns mean, so it has to
+        // change the hash. A run with cash dividends and the same run without
+        // are two trials, not one measured twice.
+        BacktestConfig {
+            actions_sha256: Some("1".repeat(64)),
+            ..base.clone()
+        },
     ];
 
     // One mutation per field. If the struct grows a field, this count is the
@@ -119,7 +126,7 @@ fn the_config_hash_ignores_decimal_scale() {
 fn the_canonical_form_is_sorted_and_compact() {
     let canonical = test_config(12).canonical_json().expect("serialises");
     assert!(
-        canonical.starts_with(r#"{"cost_per_side":"#),
+        canonical.starts_with(r#"{"actions_sha256":"#),
         "got {canonical}"
     );
     assert!(!canonical.contains(' '), "got {canonical}");

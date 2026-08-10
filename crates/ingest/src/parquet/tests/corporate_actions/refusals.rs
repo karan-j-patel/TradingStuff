@@ -24,7 +24,8 @@ fn t10_a_zero_split_ratio_is_refused() {
         },
     );
 
-    let error = write_actions(vec![broken], &path).expect_err("a zero ratio must be refused");
+    let error =
+        write_actions(vec![broken], &path, "synthetic").expect_err("a zero ratio must be refused");
     assert!(
         matches!(error, CurateError::InvalidRecords { .. }),
         "got {error:?}"
@@ -49,7 +50,8 @@ fn t10_a_negative_dividend_amount_is_refused() {
         dividend("-0.47", DividendKind::Cash),
     );
 
-    let error = write_actions(vec![broken], &path).expect_err("a negative amount is refused");
+    let error =
+        write_actions(vec![broken], &path, "synthetic").expect_err("a negative amount is refused");
     assert!(
         matches!(error, CurateError::InvalidRecords { .. }),
         "got {error:?}"
@@ -76,7 +78,8 @@ fn t10_an_action_with_no_source_is_refused() {
     );
     broken.source = String::new();
 
-    let error = write_actions(vec![broken], &path).expect_err("a sourceless record is refused");
+    let error = write_actions(vec![broken], &path, "synthetic")
+        .expect_err("a sourceless record is refused");
     assert!(
         matches!(error, CurateError::InvalidRecords { .. }),
         "got {error:?}"
@@ -98,7 +101,7 @@ fn t10_a_refused_write_leaves_the_previous_file_byte_identical() {
         day(2021, 5, 3),
         CorporateAction::Split { ratio: dec("2") },
     );
-    write_actions(vec![good.clone()], &path).expect("the first write succeeds");
+    write_actions(vec![good.clone()], &path, "synthetic").expect("the first write succeeds");
     let before = std::fs::read(&path).expect("reading the good file");
 
     let broken = action(
@@ -108,7 +111,8 @@ fn t10_a_refused_write_leaves_the_previous_file_byte_identical() {
             ratio: Decimal::ZERO,
         },
     );
-    write_actions(vec![good, broken], &path).expect_err("a zero ratio must be refused");
+    write_actions(vec![good, broken], &path, "synthetic")
+        .expect_err("a zero ratio must be refused");
 
     let after = std::fs::read(&path).expect("reading the file again");
     assert_eq!(
@@ -133,8 +137,8 @@ fn t11_an_exact_duplicate_is_refused_and_named() {
     );
     let twice = once.clone();
 
-    let error =
-        write_actions(vec![once, twice], &path).expect_err("an exact duplicate must be refused");
+    let error = write_actions(vec![once, twice], &path, "synthetic")
+        .expect_err("an exact duplicate must be refused");
     let message = error.to_string();
 
     assert!(
@@ -171,7 +175,7 @@ fn t11_a_duplicate_across_a_ticker_rename_is_still_a_duplicate() {
         CorporateAction::Split { ratio: dec("2") },
     );
 
-    let error = write_actions(vec![before, after], &path)
+    let error = write_actions(vec![before, after], &path, "synthetic")
         .expect_err("the same permaticker is the same asset");
     assert!(
         matches!(error, CurateError::DuplicateRow { .. }),
@@ -218,7 +222,10 @@ fn t11_same_day_actions_write_in_one_known_order() {
         special.clone(),
         cash.clone(),
     ];
-    assert_eq!(write_actions(shuffled, &path).expect("write"), 5);
+    assert_eq!(
+        write_actions(shuffled, &path, "synthetic").expect("write"),
+        5
+    );
 
     // Written out rather than computed, so a change to the order has to be
     // acknowledged here rather than silently agreeing with itself.

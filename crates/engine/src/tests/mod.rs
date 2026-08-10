@@ -17,9 +17,11 @@
 
 mod accounting;
 mod baselines;
+mod dividends;
 mod eligibility;
 mod hashing;
 
+use ingest::actions::{ActionRecord, CorporateAction, DividendKind};
 use ingest::adjusted::AdjustedBar;
 use ingest::schema::{AssetKey, CloseKind, PermanentId, SessionScope};
 use jiff::civil::{Date, date};
@@ -96,6 +98,34 @@ pub fn panel_of(series: &[(AssetKey, Vec<(Date, Decimal)>)]) -> Panel {
         })
         .collect();
     Panel::from_bars(bars).expect("fixture panel builds")
+}
+
+/// One synthetic cash dividend record.
+pub fn cash_dividend(asset: &AssetKey, ex_date: Date, amount: Decimal) -> ActionRecord {
+    ActionRecord {
+        asset: asset.clone(),
+        effective: ex_date,
+        action: CorporateAction::Dividend {
+            amount,
+            kind: DividendKind::Cash,
+        },
+        source: "synthetic".to_string(),
+    }
+}
+
+/// Attach cash dividends to a panel a fixture already built.
+///
+/// A separate step rather than a wider `panel_of`, so every existing fixture
+/// keeps its signature and a test that says nothing about dividends is
+/// demonstrably running the path that has none.
+pub fn with_cash_dividends(panel: Panel, dividends: &[(AssetKey, Date, Decimal)]) -> Panel {
+    let records: Vec<ActionRecord> = dividends
+        .iter()
+        .map(|(asset, ex_date, amount)| cash_dividend(asset, *ex_date, *amount))
+        .collect();
+    panel
+        .with_dividends(&records)
+        .expect("fixture dividends attach")
 }
 
 /// Two securities over the six month-ends.

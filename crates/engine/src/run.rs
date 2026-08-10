@@ -23,7 +23,7 @@ use crate::momentum::{self, Rebalance};
 use crate::panel::Panel;
 use crate::portfolio::{self, Weights};
 
-/// The caveat block, printed and recorded verbatim.
+/// The caveat block for a run with no actions file behind it.
 ///
 /// The directions are not interchangeable and were corrected once already.
 /// Excluded cash dividends leave a long-only total return too low. A delisting
@@ -38,6 +38,36 @@ Returns are price returns from split and stock-dividend adjusted closes.
   imputation, which OVERSTATES it, biasing it UP.
   The two partially offset and the net direction is UNKNOWN. This is not a
   conservative estimate and must not be described as one.";
+
+/// The caveat block for a run that applied cash dividends.
+///
+/// One bias is gone and the other is not, so the closing line stops saying the
+/// direction is unknown and says which way it goes. That is a stronger claim
+/// than the block above makes and it is only true when the dividends are
+/// actually in the arithmetic, which is why the two literals are selected by
+/// [`caveats`] rather than edited into one.
+pub const CAVEATS_WITH_DIVIDENDS: &str = "\
+Returns include cash dividends on their ex-dates, on top of split and
+  stock-dividend adjusted closes. Cash paid mid-month is held uninvested until
+  the next rebalance rather than reinvested on the day it arrives.
+  Delisted names exit at their last available close with no delisting-return
+  imputation, which OVERSTATES a long-only total return, biasing it UP.
+  The remaining known bias is UP. This is not a conservative
+  estimate and must not be described as one.";
+
+/// Which caveat block belongs to a run.
+///
+/// A function rather than a caller deciding, because the two blocks make
+/// different claims about the direction of the remaining bias and picking the
+/// wrong one publishes a bias statement that is not true of the figure beside
+/// it.
+pub fn caveats(dividends_applied: bool) -> &'static str {
+    if dividends_applied {
+        CAVEATS_WITH_DIVIDENDS
+    } else {
+        CAVEATS
+    }
+}
 
 /// One strategy's monthly series and the accounting behind it.
 #[derive(Debug, Clone)]
@@ -135,10 +165,25 @@ pub struct Report {
     pub eligible_max: usize,
     pub buy_and_hold: BaselineSeries,
     pub random: RandomBaseline,
+    /// Whether cash dividends are in these returns, which decides which caveat
+    /// block the figures are published under.
+    pub dividends_applied: bool,
 }
 
 /// Run the momentum strategy and both baselines over a panel.
 pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, EngineError> {
+    // Checked before anything runs. The configuration is what the trial log
+    // records and the panel is what the arithmetic sees, so a disagreement
+    // between them is a number labelled as something it is not. Catching it at
+    // the boundary costs one comparison; catching it later means noticing that
+    // a published figure was wrong.
+    if config.actions_sha256.is_some() != panel.dividends_attached() {
+        return Err(EngineError::DividendWiringMismatch {
+            config_has_actions: config.actions_sha256.is_some(),
+            panel_has_dividends: panel.dividends_attached(),
+        });
+    }
+
     let month_ends = panel.month_ends();
     let lead_in = config.required_lead_in();
     // Two dates are needed after the lead-in: one to buy on and one to sell on.
@@ -223,6 +268,10 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
         strategy,
         buy_and_hold,
         random,
+        // Equal to `config.actions_sha256.is_some()` by the guard at the top of
+        // this function, and read off the panel because the panel is what the
+        // arithmetic actually used.
+        dividends_applied: panel.dividends_attached(),
         config: config.clone(),
     })
 }

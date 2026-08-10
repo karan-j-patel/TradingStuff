@@ -128,8 +128,19 @@ pub(crate) mod columns {
         pub(crate) const STOCKS: &str = "stocks";
         pub(crate) const TICKERS: &str = "tickers";
         pub(crate) const FUNDAMENTALS: &str = "fundamentals";
+        /// Corporate actions. Verified live 2026-08-10 by
+        /// `cli ingest probe-actions`, which is the only reason this spelling
+        /// is trusted rather than guessed.
+        pub(crate) const ACTIONS: &str = "actions";
     }
 }
+
+/// The native price table, for a probe building a raw request by hand.
+///
+/// Re-exported rather than respelled at the call site. A wrong-case name is
+/// answered with an empty result rather than an error, so every spelling of a
+/// table name in this codebase comes from [`columns::native_tables`].
+pub const NATIVE_STOCKS_TABLE: &str = columns::native_tables::STOCKS;
 
 /// The name this connector reports in errors and in stored provenance.
 pub const PROVIDER: &str = "Sharadar";

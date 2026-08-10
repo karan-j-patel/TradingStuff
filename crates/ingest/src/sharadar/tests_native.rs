@@ -38,6 +38,7 @@ const EMPTY: &str = r#"{"count":0,"data":[]}"#;
 const WIRE_STOCKS: &str = "stocks";
 const WIRE_TICKERS: &str = "tickers";
 const WIRE_FUNDAMENTALS: &str = "fundamentals";
+const WIRE_ACTIONS: &str = "actions";
 
 // --- a transport that answers by table --------------------------------------
 
@@ -756,4 +757,192 @@ fn n8_an_empty_master_is_an_error_rather_than_an_empty_universe() {
         error.to_string().contains(WIRE_TICKERS),
         "the error must name the table: {error}"
     );
+}
+
+// --- N4: the corporate actions fetch ----------------------------------------
+
+/// One fabricated actions row, in the shape the probe measured on 2026-08-10.
+///
+/// Seven fields, `value` bare as the host sends it, and `contraticker` and
+/// `contraname` carrying the string `"N/A"` rather than JSON null, because that
+/// is what this table really does.
+fn action_row(date: &str, action: &str, value: &str) -> String {
+    format!(
+        r#"{{"date":"{date}","action":"{action}","ticker":"ZZTOP","name":"Fabricated Holdings Inc","value":{value},"contraticker":"N/A","contraname":"N/A"}}"#
+    )
+}
+
+fn dividends(client: &SharadarClient) -> Result<Vec<crate::actions::ActionRecord>, SourceError> {
+    client.fetch_cash_dividends(
+        &AssetKey {
+            ticker: "ZZTOP".to_string(),
+            permanent: Some(PermanentId::Sharadar(199_059)),
+        },
+        crate::provider::DateRange::new(date("2023-01-01"), date("2023-12-31")).expect("range"),
+    )
+}
+
+/// N4. A vendor row becomes a cash dividend carrying the caller's identity.
+#[test]
+fn n4_an_actions_row_decodes_into_a_cash_dividend() {
+    let fake = Fake::serving(
+        WIRE_ACTIONS,
+        &[envelope(&[action_row("2023-03-16", "dividend", "0.19")])],
+    );
+
+    let records = dividends(&client(&fake)).expect("the fetch succeeds");
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].effective, date("2023-03-16"));
+    assert_eq!(
+        records[0].action,
+        crate::actions::CorporateAction::Dividend {
+            amount: decimal("0.19"),
+            kind: crate::actions::DividendKind::Cash,
+        }
+    );
+    assert_eq!(
+        records[0].asset.permanent,
+        Some(PermanentId::Sharadar(199_059)),
+        "the caller's permanent identity must survive, or a curated action \
+         cannot be matched to its own price series after a ticker change"
+    );
+    assert_eq!(records[0].source, super::PROVIDER);
+
+    // The kind filter is sent, so the vendor does the work rather than this
+    // process downloading every action ever recorded and discarding most of it.
+    assert!(
+        fake.seen.borrow()[0].contains("action=dividend"),
+        "got {}",
+        fake.seen.borrow()[0]
+    );
+}
+
+/// N4. A kind that is not exactly `dividend` is a hard error.
+///
+/// This is the `spinoffdividend` trap, observed live on 2026-08-10: that kind
+/// carries the per-share value of shares in a spun-off company rather than
+/// cash, at a magnitude two orders above a quarterly dividend. Booking it as a
+/// distribution invents money, and one such row moves a monthly return by
+/// percent. The row below is fabricated in its image.
+///
+/// A row like this can only arrive if the server-side filter stopped being
+/// honoured, which is precisely the change no request-side code would notice.
+#[test]
+fn n4_a_kind_that_is_not_exactly_dividend_is_refused() {
+    let fake = Fake::serving(
+        WIRE_ACTIONS,
+        &[envelope(&[
+            action_row("2023-03-16", "dividend", "0.19"),
+            action_row("2023-03-31", "spinoffdividend", "21.5"),
+        ])],
+    );
+
+    let error = dividends(&client(&fake)).expect_err("an unfiltered kind must not be mapped");
+    let rendered = error.to_string();
+
+    assert!(matches!(error, SourceError::Malformed { .. }));
+    assert!(
+        rendered.contains("spinoffdividend"),
+        "the error must name the kind it refused: {rendered}"
+    );
+}
+
+/// N4. A null amount is refused rather than read as zero.
+///
+/// Measured 2026-08-10: `value` is null on `listed`, `relation` and both
+/// ticker-change kinds. A null reaching the panel as zero would be a dividend
+/// of nothing, which passes every positivity check by being absent.
+#[test]
+fn n4_a_null_amount_is_refused() {
+    let fake = Fake::serving(
+        WIRE_ACTIONS,
+        &[envelope(&[action_row("2023-03-16", "dividend", "null")])],
+    );
+
+    let error = dividends(&client(&fake)).expect_err("a null amount must not decode");
+    assert!(matches!(error, SourceError::Malformed { .. }));
+    assert!(error.to_string().contains("value"), "got {error}");
+}
+
+/// N4. A security that paid nothing in the window is not an error.
+///
+/// The opposite of the price fetch, where an empty answer means the request was
+/// wrong. Most securities pay no dividends, so refusing an empty answer here
+/// would refuse the common case.
+#[test]
+fn n4_no_dividends_in_the_window_is_an_empty_success() {
+    let fake = Fake::serving(WIRE_ACTIONS, &[EMPTY.to_string()]);
+    assert!(
+        dividends(&client(&fake))
+            .expect("an empty answer is fine")
+            .is_empty()
+    );
+}
+
+/// N4. The page-boundary check covers the actions table too.
+///
+/// The walk is the same `fetch_native`, so this is the shared machinery rather
+/// than a second implementation. What it proves is that the new table goes
+/// through it, with a sort key that exists, rather than around it.
+#[test]
+fn n4_the_actions_walk_checks_its_page_boundary() {
+    let page_one = envelope(&[
+        action_row("2023-03-16", "dividend", "1"),
+        action_row("2023-06-15", "dividend", "2"),
+        action_row("2023-09-14", "dividend", "3"),
+    ]);
+    // Shifted underneath the walk: the overlap row is a different row from the
+    // one held, though it sorts to the same place.
+    let page_two = envelope(&[
+        action_row("2023-09-14", "dividend", "9"),
+        action_row("2023-12-14", "dividend", "4"),
+    ]);
+    let fake = Fake::serving(WIRE_ACTIONS, &[page_one, page_two]);
+
+    let error = dividends(&paging_client(&fake)).expect_err("a shifted boundary must error");
+    assert!(matches!(error, SourceError::Malformed { .. }));
+    assert!(
+        error.to_string().contains("2023-09-14"),
+        "the error must name the boundary: {error}"
+    );
+}
+
+/// N4. A clean walk across a page boundary keeps every row exactly once.
+#[test]
+fn n4_a_clean_actions_walk_keeps_every_row() {
+    let page_one = envelope(&[
+        action_row("2023-03-16", "dividend", "1"),
+        action_row("2023-06-15", "dividend", "2"),
+        action_row("2023-09-14", "dividend", "3"),
+    ]);
+    let page_two = envelope(&[
+        action_row("2023-09-14", "dividend", "3"),
+        action_row("2023-12-14", "dividend", "4"),
+    ]);
+    let fake = Fake::serving(WIRE_ACTIONS, &[page_one, page_two]);
+
+    let records = dividends(&paging_client(&fake)).expect("a clean walk succeeds");
+
+    let dates: Vec<String> = records
+        .iter()
+        .map(|record| record.effective.to_string())
+        .collect();
+    assert_eq!(
+        dates,
+        ["2023-03-16", "2023-06-15", "2023-09-14", "2023-12-14"],
+        "the overlap row was dropped or duplicated"
+    );
+}
+
+/// N4. The actions table name matches the wire, compared against a literal.
+///
+/// The actions fetch accepts an empty answer, so the wrong-case trap cannot be
+/// caught behaviourally the way `n3_zero_rows_for_a_known_live_ticker_is_an_error`
+/// catches it for prices. A miscased constant here would report that nobody in
+/// the universe has ever paid a dividend, and every downstream number would
+/// look plausible. This assertion is the only thing standing in front of that.
+#[test]
+fn n4_the_actions_table_name_matches_the_wire() {
+    assert_eq!(native_tables::ACTIONS, WIRE_ACTIONS);
 }

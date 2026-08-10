@@ -47,10 +47,13 @@ pub enum Strategy<'a> {
     /// attempt with a null Sharpe, which is accurate: something was tried and
     /// no figure came back.
     Declared(&'a str),
-    /// The momentum engine over a curated price file and a universe file.
+    /// The momentum engine over a curated price file and a universe file, and
+    /// optionally a curated actions file whose cash dividends reach the
+    /// returns.
     Momentum {
         prices: &'a Path,
         universe: &'a Path,
+        actions: Option<&'a Path>,
     },
 }
 
@@ -63,12 +66,22 @@ impl<'a> Strategy<'a> {
         config: Option<&'a str>,
         prices: Option<&'a PathBuf>,
         universe: Option<&'a PathBuf>,
+        actions: Option<&'a PathBuf>,
     ) -> anyhow::Result<Self> {
         match (config, prices, universe) {
-            (Some(config), None, None) => Ok(Strategy::Declared(config)),
+            // `--actions` is refused here rather than ignored. A run that was
+            // asked for dividends and quietly produced price returns is the
+            // exact mislabelling the engine's wiring guard exists to prevent,
+            // and it would arrive with a hash saying no actions were used.
+            (Some(config), None, None) if actions.is_none() => Ok(Strategy::Declared(config)),
+            (Some(_), None, None) => anyhow::bail!(
+                "--actions applies cash dividends to an engine run, and --config declares a \
+                 configuration with no engine behind it, so the two cannot go together"
+            ),
             (None, Some(prices), Some(universe)) => Ok(Strategy::Momentum {
                 prices: prices.as_path(),
                 universe: universe.as_path(),
+                actions: actions.map(PathBuf::as_path),
             }),
             _ => anyhow::bail!(
                 "give either --config, for a configuration with no engine behind it, or \
@@ -133,11 +146,15 @@ pub fn run(trials_path: &str, program: &str, strategy: &Strategy<'_>) -> anyhow:
 fn evaluate(strategy: &Strategy<'_>) -> (ConfigHash, Outcome) {
     match strategy {
         Strategy::Declared(config) => (ConfigHash::of(config.as_bytes()), Outcome::Declared),
-        Strategy::Momentum { prices, universe } => momentum(prices, universe),
+        Strategy::Momentum {
+            prices,
+            universe,
+            actions,
+        } => momentum(prices, universe, *actions),
     }
 }
 
-fn momentum(prices: &Path, universe: &Path) -> (ConfigHash, Outcome) {
+fn momentum(prices: &Path, universe: &Path, actions: Option<&Path>) -> (ConfigHash, Outcome) {
     // Used only when the configuration itself cannot be resolved, which happens
     // when the universe file cannot be read. The attempt still consumed a look
     // at the data and is still recorded, so it still needs a hash.
@@ -152,7 +169,7 @@ fn momentum(prices: &Path, universe: &Path) -> (ConfigHash, Outcome) {
         )
     };
 
-    let (config, members) = match resolve(universe) {
+    let (config, members) = match resolve(universe, actions) {
         Ok(resolved) => resolved,
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
@@ -161,7 +178,7 @@ fn momentum(prices: &Path, universe: &Path) -> (ConfigHash, Outcome) {
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
 
-    match execute(prices, &members, &config) {
+    match execute(prices, actions, &members, &config) {
         Ok(report) => (config_hash, Outcome::Ran(Box::new(report))),
         Err(error) => (config_hash, Outcome::Failed(format!("{error:#}"))),
     }
@@ -169,7 +186,17 @@ fn momentum(prices: &Path, universe: &Path) -> (ConfigHash, Outcome) {
 
 /// Read the universe file once, for the hash the trial records and for the
 /// membership the panel is filtered to.
-fn resolve(universe: &Path) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>)> {
+///
+/// The actions file is hashed here too, over its bytes on disk. Hashing the
+/// file rather than the records it decodes to means a refetch that changes a
+/// byte without changing what the engine sees records as a new trial. That is
+/// over-counting, and over-counting is the safe direction: it makes the
+/// deflated Sharpe's denominator larger and every reported probability more
+/// conservative.
+fn resolve(
+    universe: &Path,
+    actions: Option<&Path>,
+) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>)> {
     let text = std::fs::read_to_string(universe)
         .with_context(|| format!("reading the universe file {}", universe.display()))?;
     // Hashed over the bytes on disk, so the recorded value is the one `shasum`
@@ -178,11 +205,28 @@ fn resolve(universe: &Path) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>
     let entries = ingest::universe::from_jsonl(&text)
         .map_err(|error| anyhow::anyhow!("universe file line {}: {}", error.line, error.source))?;
     let members = entries.into_iter().map(|entry| entry.asset).collect();
-    Ok((BacktestConfig::momentum_v0(sha256), members))
+
+    let actions_sha256 = match actions {
+        None => None,
+        Some(path) => {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("reading the actions file {}", path.display()))?;
+            Some(rigor::hash_bytes(&bytes))
+        }
+    };
+
+    Ok((
+        BacktestConfig {
+            actions_sha256,
+            ..BacktestConfig::momentum_v0(sha256)
+        },
+        members,
+    ))
 }
 
 fn execute(
     prices: &Path,
+    actions: Option<&Path>,
     members: &HashSet<AssetKey>,
     config: &BacktestConfig,
 ) -> anyhow::Result<Report> {
@@ -206,5 +250,37 @@ fn execute(
     }
 
     let panel = Panel::from_bars(kept)?;
+
+    // Attached before the run, and only when an actions file was named. The
+    // engine refuses a panel whose dividend state disagrees with the
+    // configuration, so a mistake here fails loudly rather than producing a
+    // number labelled as something it is not.
+    let panel = match actions {
+        None => panel,
+        Some(path) => {
+            let records = ingest::parquet::read_actions(path)
+                .with_context(|| format!("reading curated actions from {}", path.display()))?;
+            let read = records.len();
+            let panel = panel.with_dividends(&records)?;
+            println!("Read {read} corporate actions from {}.", path.display());
+            println!(
+                "  cash dividends applied to holdings, on their ex-dates, held uninvested \
+                 until the next rebalance"
+            );
+            // Both censuses printed whatever their value, so a run that applied
+            // almost nothing says so rather than looking identical to one that
+            // applied everything.
+            println!(
+                "  {} named a security outside the universe file",
+                panel.unmatched_dividends()
+            );
+            println!(
+                "  {} were not cash dividends and changed no return",
+                panel.non_cash_actions()
+            );
+            panel
+        }
+    };
+
     Ok(engine::backtest(&panel, config)?)
 }

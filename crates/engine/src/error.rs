@@ -49,6 +49,26 @@ pub enum EngineError {
     )]
     TotalLoss { date: Date },
 
+    #[error(
+        "a cash dividend for {ticker} on {date} carries the non-positive amount {amount}, and \
+         nothing per-share is distributed at zero or below"
+    )]
+    NonPositiveDividend {
+        ticker: String,
+        date: Date,
+        amount: rust_decimal::Decimal,
+    },
+
+    #[error(
+        "the configuration names an actions file ({config_has_actions}) but the panel carries \
+         attached dividends ({panel_has_dividends}), and those must agree. Otherwise the run \
+         reports a dividend treatment it did not apply"
+    )]
+    DividendWiringMismatch {
+        config_has_actions: bool,
+        panel_has_dividends: bool,
+    },
+
     #[error("encoding the configuration for hashing failed")]
     ConfigEncode(#[source] serde_json::Error),
 }

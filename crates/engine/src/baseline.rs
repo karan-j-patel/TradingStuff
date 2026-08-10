@@ -103,8 +103,16 @@ pub fn buy_and_hold(
             if open <= Decimal::ZERO {
                 return Err(EngineError::math("dividing by a non-positive entry price"));
             }
+            // The same cash the strategy loop collects, through the same
+            // helper. A baseline that missed dividends the strategy received
+            // would be losing to it on treatment rather than on selection.
+            // Named for what it is, because `cash` a few lines down is the
+            // portfolio's cash *weight* and shadowing one with the other would
+            // let a future edit corrupt the weight silently.
+            let dividend_cash = series.dividend_cash_in(from, to)?;
             let security_return = close
-                .checked_div(open)
+                .checked_add(dividend_cash)
+                .and_then(|marked| marked.checked_div(open))
                 .and_then(|ratio| ratio.checked_sub(Decimal::ONE))
                 .ok_or_else(|| EngineError::math("computing a buy-and-hold security return"))?;
             gross = weight

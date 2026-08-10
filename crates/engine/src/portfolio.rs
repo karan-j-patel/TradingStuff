@@ -120,8 +120,15 @@ pub fn advance(
         if open <= Decimal::ZERO {
             return Err(EngineError::math("dividing by a non-positive entry price"));
         }
+
+        // Cash collected over the month, added to the closing mark. A holding
+        // that stopped trading still collects: the fallback close above is the
+        // last print, and cash that went ex before it reached the holder just
+        // as it would have on a live name.
+        let cash = series.dividend_cash_in(from, to)?;
         let security_return = close
-            .checked_div(open)
+            .checked_add(cash)
+            .and_then(|marked| marked.checked_div(open))
             .and_then(|ratio| ratio.checked_sub(Decimal::ONE))
             .ok_or_else(|| EngineError::math("computing a security return"))?;
 

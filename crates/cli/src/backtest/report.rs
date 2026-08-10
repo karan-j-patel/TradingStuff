@@ -136,8 +136,18 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
     println!();
 
     println!("Caveats, recorded with the result.");
-    println!("  {}", engine::CAVEATS);
+    println!("  {}", caveat_block(report));
     println!();
+}
+
+/// The caveat block this report is published under.
+///
+/// A named function rather than the call inlined above, so the selection can be
+/// asserted without capturing stdout. The two blocks make different claims
+/// about which way the remaining bias runs, and a printer that ignored the flag
+/// would attach the wrong claim to a real figure.
+pub(super) fn caveat_block(report: &Report) -> &'static str {
+    engine::caveats(report.dividends_applied)
 }
 
 /// The Deflated Sharpe Ratio against both trial counts, rule 2.

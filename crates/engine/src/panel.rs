@@ -21,12 +21,23 @@
 
 use std::collections::BTreeMap;
 
+use ingest::actions::{ActionRecord, CorporateAction, DividendKind};
 use ingest::adjusted::AdjustedBar;
 use ingest::schema::{AssetKey, PermanentId};
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 
 use crate::error::EngineError;
+
+/// One cash dividend: the date it went ex, and the amount per share.
+///
+/// Private to this module. Nothing outside needs the pair, because the only
+/// question anyone asks of them is [`Series::dividend_cash_in`].
+#[derive(Debug, Clone, Copy)]
+struct CashDividend {
+    ex_date: Date,
+    amount: Decimal,
+}
 
 /// The deterministic sort key for a security.
 ///
@@ -49,9 +60,61 @@ pub struct Series {
     pub asset: AssetKey,
     pub identity: String,
     bars: Vec<AdjustedBar>,
+    /// Cash dividends, ascending by ex-date. Empty until
+    /// [`Panel::with_dividends`] attaches any, which is what keeps a run with
+    /// no actions file byte-identical to one from before this existed.
+    dividends: Vec<CashDividend>,
 }
 
 impl Series {
+    /// Cash dividends whose ex-date falls in `(from, to]`, summed.
+    ///
+    /// One helper rather than the arithmetic written twice, because the two
+    /// return loops in this crate are duplicated already and a boundary rule
+    /// that drifts between them would be invisible.
+    ///
+    /// # Which holder the cash belongs to
+    ///
+    /// The *ex-date* is the first day a share trades without the right to the
+    /// declared dividend, which is why the price drops by roughly the dividend
+    /// that morning. So the window is half-open at the start and closed at the
+    /// end. A dividend going ex exactly on `from` belongs to whoever held the
+    /// share the day before, and the close of `from` that this holder paid has
+    /// already given the cash up. A dividend going ex exactly on `to` is
+    /// collected, because the drop it causes is inside the return being
+    /// measured.
+    ///
+    /// # Why the amount is added as it arrives
+    ///
+    /// The vendor restates dividend amounts onto the same basis as its adjusted
+    /// close, so the figure shipped against a date before a later split is
+    /// already the split-adjusted per-share amount and adds straight to
+    /// `close`. Measured 2026-08-10 on Walmart's dividend of 2023-03-16,
+    /// publicly declared at 0.57 per share ahead of the 3-for-1 split of
+    /// 2024-02-26 and shipped as the split-adjusted 0.57 / 3: adding it
+    /// unscaled to the adjusted close reproduces the vendor's own
+    /// dividend-adjusted return to 1.1e-5, which is the rounding of that
+    /// series itself, while first scaling it by the bar's
+    /// `close / close_unadjusted` lands 2.7e-3 away. Scaling here would be a
+    /// bug that reads like care.
+    ///
+    /// # What this deliberately does not model
+    ///
+    /// Cash received mid-month sits uninvested until `to`. Reinvesting it on
+    /// the ex-date needs a daily loop, and at rebalance granularity holding it
+    /// is the standard approximation and the honest one available.
+    pub fn dividend_cash_in(&self, from: Date, to: Date) -> Result<Decimal, EngineError> {
+        let mut total = Decimal::ZERO;
+        for dividend in &self.dividends {
+            if dividend.ex_date > from && dividend.ex_date <= to {
+                total = total.checked_add(dividend.amount).ok_or_else(|| {
+                    EngineError::math("summing cash dividends over a holding period")
+                })?;
+            }
+        }
+        Ok(total)
+    }
+
     /// The split-adjusted close on exactly `date`, if the security traded then.
     pub fn close_on(&self, date: Date) -> Option<Decimal> {
         self.bar_on(date).map(|bar| bar.close)
@@ -125,6 +188,15 @@ pub struct Panel {
     securities: Vec<Series>,
     dates: Vec<Date>,
     month_ends: Vec<Date>,
+    /// Whether dividends have been attached at all, which is a different
+    /// question from whether any arrived. True after an attachment that matched
+    /// nothing, because the run still read an actions file and still reports
+    /// dividend-inclusive returns.
+    dividends_attached: bool,
+    /// Records naming a security this panel does not hold.
+    unmatched_dividends: usize,
+    /// Records that were not cash dividends, and so were not consumed.
+    non_cash_actions: usize,
 }
 
 impl Panel {
@@ -155,6 +227,7 @@ impl Panel {
                 asset,
                 identity,
                 bars: by_date.into_values().collect(),
+                dividends: Vec::new(),
             })
             .collect();
 
@@ -174,11 +247,120 @@ impl Panel {
             securities,
             dates,
             month_ends,
+            dividends_attached: false,
+            unmatched_dividends: 0,
+            non_cash_actions: 0,
+        })
+    }
+
+    /// A new panel carrying the cash dividends in `records`.
+    ///
+    /// Consumes the panel and returns a new one rather than mutating in place,
+    /// so a caller cannot end up holding a panel whose dividend state changed
+    /// underneath it.
+    ///
+    /// Only [`DividendKind::Cash`] is consumed. Splits and spin-offs already
+    /// live in the adjusted close, and a stock dividend does too, so adding any
+    /// of them as cash would count the same event twice and bias returns up.
+    /// Everything not consumed is counted rather than dropped quietly, because
+    /// a census of what was ignored is the only way anyone notices that a file
+    /// was mostly ignored.
+    pub fn with_dividends(self, records: &[ActionRecord]) -> Result<Panel, EngineError> {
+        let mut by_identity: BTreeMap<String, Vec<CashDividend>> = BTreeMap::new();
+        let mut non_cash_actions = 0usize;
+
+        for record in records {
+            let CorporateAction::Dividend {
+                amount,
+                kind: DividendKind::Cash,
+            } = record.action
+            else {
+                non_cash_actions += 1;
+                continue;
+            };
+
+            // `validate_action` holds this at the writer boundary, and a record
+            // built in memory has never been past it. A non-positive amount
+            // reaching the sum would move a return without anyone having
+            // distributed anything.
+            if amount <= Decimal::ZERO {
+                return Err(EngineError::NonPositiveDividend {
+                    ticker: record.asset.ticker.clone(),
+                    date: record.effective,
+                    amount,
+                });
+            }
+
+            by_identity
+                .entry(identity(&record.asset))
+                .or_default()
+                .push(CashDividend {
+                    ex_date: record.effective,
+                    amount,
+                });
+        }
+
+        // Destructured rather than updated field by field: `..self` cannot
+        // follow a move out of `self.securities`, and naming the carried-over
+        // fields here means a future field cannot be forgotten silently.
+        let Panel {
+            securities,
+            dates,
+            month_ends,
+            ..
+        } = self;
+
+        let mut unmatched_dividends = 0usize;
+        let securities: Vec<Series> = securities
+            .into_iter()
+            .map(|series| {
+                let mut dividends = by_identity.remove(&series.identity).unwrap_or_default();
+                // Ascending by ex-date, because the sum walks them in order and
+                // a fixture that happened to supply them sorted would otherwise
+                // be the only reason this held.
+                dividends.sort_by_key(|dividend| dividend.ex_date);
+                Series {
+                    dividends,
+                    ..series
+                }
+            })
+            .collect();
+
+        // Whatever is left named a security the panel does not hold. Counted
+        // and surfaced rather than treated as an error: a universe file is a
+        // sample of the master, so an actions file covering the master is
+        // expected to overhang it.
+        for leftover in by_identity.values() {
+            unmatched_dividends += leftover.len();
+        }
+
+        Ok(Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_attached: true,
+            unmatched_dividends,
+            non_cash_actions,
         })
     }
 
     pub fn securities(&self) -> &[Series] {
         &self.securities
+    }
+
+    /// Whether an actions file was attached, however little of it applied.
+    pub fn dividends_attached(&self) -> bool {
+        self.dividends_attached
+    }
+
+    /// Dividend records naming a security outside this panel.
+    pub fn unmatched_dividends(&self) -> usize {
+        self.unmatched_dividends
+    }
+
+    /// Action records that were not cash dividends, and so changed nothing.
+    pub fn non_cash_actions(&self) -> usize {
+        self.non_cash_actions
     }
 
     /// Last trading day of each calendar month present, ascending.

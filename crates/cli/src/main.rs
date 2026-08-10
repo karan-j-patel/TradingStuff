@@ -77,12 +77,17 @@ enum Command {
         /// its members are the only securities the run may see
         #[arg(long, requires = "prices")]
         universe: Option<PathBuf>,
+        /// Curated corporate actions Parquet. Its cash dividends are added to
+        /// holding returns and its SHA-256 goes into the configuration hash,
+        /// so a run with dividends is a different trial from one without
+        #[arg(long, requires = "prices")]
+        actions: Option<PathBuf>,
     },
 
     /// Report which data providers this machine is configured for
     ///
-    /// With no action it reports presence and nothing else. `probe-sep` reads a
-    /// few vendor rows and prints them.
+    /// With no action it reports presence and nothing else. `probe-sep` and
+    /// `probe-actions` read a few vendor rows and print them.
     Ingest {
         #[command(subcommand)]
         action: Option<ingest::Action>,
@@ -108,8 +113,14 @@ fn main() -> ExitCode {
             config,
             prices,
             universe,
-        } => backtest::Strategy::from_args(config.as_deref(), prices.as_ref(), universe.as_ref())
-            .and_then(|strategy| backtest::run(&trials, &program, &strategy)),
+            actions,
+        } => backtest::Strategy::from_args(
+            config.as_deref(),
+            prices.as_ref(),
+            universe.as_ref(),
+            actions.as_ref(),
+        )
+        .and_then(|strategy| backtest::run(&trials, &program, &strategy)),
         Command::Ingest { action } => ingest::run(action.as_ref()),
         Command::Curate { dataset } => curate::run(&dataset),
     };

@@ -91,11 +91,27 @@ pub enum Dataset {
         data_root: Option<String>,
     },
 
-    /// Curate corporate actions from a JSONL file of ActionRecord records
+    /// Curate corporate actions, from a JSONL file or straight from the provider
     Actions {
         /// JSONL file to read, one ActionRecord per line
         #[arg(long)]
-        input: String,
+        input: Option<String>,
+        /// Fetch from the configured provider instead of reading a file
+        #[arg(long)]
+        fetch: bool,
+        /// Universe file to fetch, as written by `ingest fetch-universe`.
+        ///
+        /// Fetches one security at a time and tolerates a vendor declining any
+        /// one of them. Only cash dividends are fetched, which is the only kind
+        /// this platform consumes
+        #[arg(long)]
+        universe: Option<String>,
+        /// First date to fetch, inclusive. Only with --fetch
+        #[arg(long)]
+        from: Option<Date>,
+        /// Last date to fetch, inclusive. Only with --fetch
+        #[arg(long)]
+        to: Option<Date>,
         #[arg(long, help = DATA_ROOT_HELP)]
         data_root: Option<String>,
     },
@@ -139,11 +155,124 @@ pub fn run(dataset: &Dataset) -> anyhow::Result<ExitCode> {
             let root = ingest::parquet::data_root(data_root.as_deref());
             curate_delistings(input, &delistings_path(&root))
         }
-        Dataset::Actions { input, data_root } => {
+        Dataset::Actions {
+            input,
+            fetch,
+            universe,
+            from,
+            to,
+            data_root,
+        } => {
             let root = ingest::parquet::data_root(data_root.as_deref());
-            curate_actions(input, &actions_path(&root))
+            let path = actions_path(&root);
+
+            if let Some(universe) = universe {
+                if !*fetch {
+                    anyhow::bail!("--universe describes what to fetch, so it needs --fetch");
+                }
+                return fetch_actions_from_universe(universe, *from, *to, &path);
+            }
+            if *fetch {
+                anyhow::bail!(
+                    "--fetch needs --universe, so every record carries the vendor's \
+                               permanent identifier rather than a ticker string"
+                );
+            }
+
+            let input = input
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("actions needs either --input <file> or --fetch"))?;
+            // Named rather than left blank, on the same rule prices follows: a
+            // curated file whose vendor is unknown cannot be reconciled, and
+            // "an operator handed us a file" is itself the provenance.
+            curate_actions(read_jsonl(input)?, &path, "operator-jsonl")
         }
     }
+}
+
+/// Fetch cash dividends for every security in a universe file.
+///
+/// Mirrors [`curate_from_universe`], which is the prices version, down to the
+/// conduct: serial, one security at a time, a decline recorded against the name
+/// and the walk continued, and a rejected credential fatal because that is one
+/// fault affecting every remaining request.
+///
+/// Two differences from the prices walk, both because dividends are sparser
+/// than prices. A security that paid nothing is a success with no rows rather
+/// than a decline, since most securities pay nothing. And the universe file is
+/// not rewritten, because its `outcome` field records what the price fetch
+/// served and overwriting that with dividend counts would lose the record of
+/// which names have prices at all.
+fn fetch_actions_from_universe(
+    universe_path: &str,
+    from: Option<Date>,
+    to: Option<Date>,
+    path: &Path,
+) -> anyhow::Result<ExitCode> {
+    let (from, to) = match (from, to) {
+        (Some(from), Some(to)) => (from, to),
+        _ => anyhow::bail!("--fetch needs --from and --to"),
+    };
+    let range = DateRange::new(from, to)?;
+
+    let text = std::fs::read_to_string(universe_path)
+        .with_context(|| format!("reading {universe_path}"))?;
+    let entries = universe::from_jsonl(&text)?;
+    if entries.is_empty() {
+        anyhow::bail!("{universe_path} holds no securities, so there is nothing to fetch");
+    }
+
+    let source = SharadarClient::native_from_env()?;
+    let total = entries.len();
+    println!("Fetching cash dividends for {total} securities from {from} to {to}");
+    println!("  cash dividends only. Splits and stock dividends are already in the adjusted");
+    println!("  close, so fetching them as cash would count the same event twice");
+    println!("  serial, one security at a time, and a decline is recorded rather than fatal");
+    println!();
+
+    let mut records: Vec<ActionRecord> = Vec::new();
+    let mut declined = 0usize;
+    let mut paid_nothing = 0usize;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let position = index + 1;
+        let ticker = &entry.asset.ticker;
+
+        match source.fetch_cash_dividends(&entry.asset, range) {
+            Ok(fetched) if fetched.is_empty() => {
+                paid_nothing += 1;
+            }
+            Ok(fetched) => {
+                println!(
+                    "  [{position}/{total}] {ticker}: {} dividends",
+                    fetched.len()
+                );
+                records.extend(fetched);
+            }
+            Err(SourceError::Unauthorized { provider }) => {
+                anyhow::bail!(
+                    "{provider} rejected the credentials at security {position} of {total}, so \
+                     every remaining fetch would fail the same way. Nothing was written."
+                );
+            }
+            Err(error) => {
+                declined += 1;
+                println!("  [{position}/{total}] {ticker}: DECLINED, {error}");
+            }
+        }
+    }
+
+    println!();
+    println!("Fetch outcomes");
+    println!(
+        "  securities paying dividends: {}",
+        total - paid_nothing - declined
+    );
+    println!("  securities paying none:      {paid_nothing}");
+    println!("  declined:                    {declined}");
+    println!();
+
+    curate_actions(records, path, source.name())
 }
 
 /// Pull bars from the provider, refusing an incomplete instruction.
@@ -375,8 +504,7 @@ fn curate_delistings(input: &str, path: &Path) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn curate_actions(input: &str, path: &Path) -> anyhow::Result<ExitCode> {
-    let rows: Vec<ActionRecord> = read_jsonl(input)?;
+fn curate_actions(rows: Vec<ActionRecord>, path: &Path, source: &str) -> anyhow::Result<ExitCode> {
     let total = rows.len();
 
     // Pre-validation here is for reporting quality. `write_actions` is the
@@ -392,12 +520,13 @@ fn curate_actions(input: &str, path: &Path) -> anyhow::Result<ExitCode> {
     }
 
     let written =
-        write_actions(rows, path).with_context(|| format!("writing {}", path.display()))?;
+        write_actions(rows, path, source).with_context(|| format!("writing {}", path.display()))?;
 
     println!("Curated {written} corporate actions from {total} records.");
     println!("  accepted: {written}");
     println!("  rejected: 0");
     println!("  written:  {}", path.display());
+    println!("  source:   {source}");
     Ok(ExitCode::SUCCESS)
 }
 

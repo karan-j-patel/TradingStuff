@@ -46,4 +46,4 @@ mod tests;
 pub use config::{BacktestConfig, PROGRAM};
 pub use error::EngineError;
 pub use panel::Panel;
-pub use run::{CAVEATS, Report, backtest};
+pub use run::{CAVEATS, CAVEATS_WITH_DIVIDENDS, Report, backtest, caveats};

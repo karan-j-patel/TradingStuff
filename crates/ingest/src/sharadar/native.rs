@@ -25,11 +25,22 @@
 //!
 //! # What this host gets wrong quietly
 //!
-//! A wrong-case table name returns `{"count":0,"data":[]}` rather than an
-//! error, so a typo reads as "this security has no data". Table names are
-//! single-sourced in [`super::columns::native_tables`] and a fetch that filters
-//! on something known-live and gets nothing back is an error here, not an empty
-//! success.
+//! A wrong table name fails two different ways, and neither names the fault.
+//!
+//! A **wrong-case** name for a table that exists returns `{"count":0,"data":[]}`
+//! rather than an error, so a typo reads as "this security has no data". An
+//! **unknown** name is answered with HTTP 401, measured 2026-08-10 by
+//! `cli ingest probe-actions` asking for a table called `action`, which arrives
+//! as `Unauthorized` and reads as a credential problem while the credential is
+//! fine.
+//!
+//! Table names are therefore single-sourced in
+//! [`super::columns::native_tables`], every one of them is pinned against a
+//! separately written wire literal in the tests, and a fetch that filters on
+//! something known-live and gets nothing back is an error here rather than an
+//! empty success. The one fetch that must accept an empty answer is
+//! [`SharadarClient::native_actions_window`], because most securities pay no
+//! dividends, and it says there why the name pin carries the weight instead.
 //!
 //! # Offset pagination, and the integrity problem it creates
 //!
@@ -61,9 +72,11 @@ use super::decode::{date_of, decimal_of, text_of, token_of};
 use super::sep::SepRow;
 use super::tickers::TickerRow;
 use super::{MAX_PAGES, malformed, refused};
+use crate::actions::{ActionRecord, CorporateAction, DividendKind};
 use crate::adjusted::AdjustedBar;
 use crate::provider::{AdjustedPriceSource, DateRange, SourceError};
 use crate::schema::{AssetKey, CloseKind, PermanentId, SessionScope};
+use rust_decimal::Decimal;
 
 /// The fields the ticker lookup asks for.
 const TICKER_FIELDS: &str =
@@ -71,6 +84,23 @@ const TICKER_FIELDS: &str =
 
 /// The fields the price probe asks for.
 const PRICE_FIELDS: &str = "ticker,date,open,high,low,close,volume,closeunadj,lastupdated";
+
+/// The fields the actions fetch asks for.
+///
+/// `closeadj` is deliberately absent from every fetch in this file. It is the
+/// vendor's dividend-adjusted close, and storing it beside cash dividends that
+/// the engine adds to returns itself would be the same distribution counted
+/// twice.
+const ACTION_FIELDS: &str = "ticker,date,action,value";
+
+/// The one action kind this fetch asks for and the only one it accepts.
+///
+/// Matched exactly, never as a prefix or a substring. The vendor's vocabulary
+/// contains `spinoffdividend`, observed live on 2026-08-10, whose value is the
+/// per-share worth of shares in another company rather than cash anyone was
+/// paid, at a magnitude two orders above the same name's cash dividends. A
+/// loose match books it as a distribution and invents money.
+const CASH_DIVIDEND: &str = "dividend";
 
 // --- the envelope -----------------------------------------------------------
 
@@ -413,6 +443,104 @@ impl SharadarClient {
             .transpose()
     }
 
+    /// Fetch cash dividends for one ticker over an inclusive date window.
+    ///
+    /// # Why an empty answer is not an error here
+    ///
+    /// [`require_rows`] guards the price fetch, because a security with a
+    /// listing has prices and an empty answer there means the request was
+    /// wrong. Dividends are different: most securities pay none, and a name
+    /// that paid nothing in the window is the common case rather than a fault.
+    ///
+    /// That leaves the wrong-case table trap uncovered by a runtime check, so
+    /// it is covered by a test instead. `the_actions_table_name_matches_the_wire`
+    /// pins the constant against the literal spelling, written out separately,
+    /// so a miscased constant fails the suite rather than quietly reporting
+    /// that nobody pays dividends.
+    ///
+    /// # Why the kind filter is sent and then checked again
+    ///
+    /// The filter was measured honoured on 2026-08-10, against a security whose
+    /// window carries splits and an acquisition. Sending it saves the rows.
+    /// Checking every row that comes back is what notices if it ever stops
+    /// being honoured, on a host whose habit is to answer a request it does not
+    /// understand with something that looks like data.
+    pub(crate) fn native_actions_window(
+        &self,
+        ticker: &str,
+        from: Date,
+        to: Date,
+    ) -> Result<Vec<ActionRow>, SourceError> {
+        check_query_safe("ticker", ticker)?;
+
+        let params = [
+            ("ticker", ticker.to_string()),
+            ("from", from.to_string()),
+            ("to", to.to_string()),
+            ("action", CASH_DIVIDEND.to_string()),
+            ("fields", ACTION_FIELDS.to_string()),
+        ];
+
+        self.fetch_native(native_tables::ACTIONS, &params, "date", decode_action)
+    }
+
+    /// Cash dividends for one security, as domain records.
+    ///
+    /// The asset key is the caller's, not one rebuilt from the ticker string,
+    /// so the vendor's permanent identifier survives into the record exactly as
+    /// it does through the price fetch. A curated action keyed on a label
+    /// companies change would fail to match its own price series the day the
+    /// ticker moved.
+    ///
+    /// No window check against [`AdjustedPriceSource::earliest_available`].
+    /// That measures the price table, and the two are served over different
+    /// spans: the probe on 2026-08-10 was served Apple actions from 2019 by a
+    /// key whose price window had been measured elsewhere. Refusing a range on
+    /// the strength of the other table's boundary would decline data this key
+    /// does serve.
+    pub fn fetch_cash_dividends(
+        &self,
+        asset: &AssetKey,
+        range: DateRange,
+    ) -> Result<Vec<ActionRecord>, SourceError> {
+        let rows = self.native_actions_window(&asset.ticker, range.start(), range.end())?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ActionRecord {
+                asset: asset.clone(),
+                // The vendor's date is the ex-date. Measured 2026-08-10: the
+                // price and the dividend-adjusted series separate across
+                // exactly the transition ending on this date, and nowhere else
+                // in the surrounding week.
+                effective: row.date,
+                action: CorporateAction::Dividend {
+                    amount: row.amount,
+                    kind: DividendKind::Cash,
+                },
+                source: super::PROVIDER.to_string(),
+            })
+            .collect())
+    }
+
+    /// One native request, returned as the host sent it.
+    ///
+    /// For probes, which exist to find out how a table is shaped before any
+    /// decoder can be written for it. Nothing in the production path reads an
+    /// undecoded body: a fetch that ships rows into the platform goes through
+    /// [`SharadarClient::fetch_native`] so it gets pagination and the
+    /// page-boundary check with it.
+    ///
+    /// The body is redacted on the way out. A successful response has no reason
+    /// to contain the key, and "no reason to" is not the standard this codebase
+    /// prints credentials under.
+    pub fn native_raw(
+        &self,
+        table: &str,
+        params: &[(&str, String)],
+    ) -> Result<String, SourceError> {
+        Ok(self.redact(&self.get_native(table, params)?))
+    }
+
     /// Filing dates from the fundamentals table.
     ///
     /// Exists to exercise the one column whose name genuinely differs between
@@ -476,6 +604,40 @@ fn decode_ticker(row: &NativeRow<'_>) -> Result<Option<TickerRow>, SourceError> 
         first_price_date: row.optional_date("firstpricedate")?,
         last_price_date: row.optional_date("lastpricedate")?,
     }))
+}
+
+/// One decoded vendor actions row.
+///
+/// Private to this module, like [`SepRow`] is to the price path. What leaves
+/// the crate is the domain record, so no caller can end up holding a vendor
+/// row's idea of what a field means.
+pub(crate) struct ActionRow {
+    pub(crate) date: Date,
+    pub(crate) amount: Decimal,
+}
+
+fn decode_action(row: &NativeRow<'_>) -> Result<ActionRow, SourceError> {
+    // Exact equality, and an error rather than a skip. Skipping would leave a
+    // filter that has silently stopped working looking exactly like a quarter
+    // in which nobody paid anything.
+    let kind = row.text("action")?;
+    if kind != CASH_DIVIDEND {
+        return Err(malformed(format!(
+            "the actions query filtered on {CASH_DIVIDEND:?} and got a row marked {kind:?}, \
+             so the server-side filter was not honoured. Nothing here maps an unexpected kind \
+             to cash: {CASH_DIVIDEND:?} and \"spinoffdividend\" are different events, and the \
+             second carries the per-share value of shares in another company"
+        )));
+    }
+
+    Ok(ActionRow {
+        date: row.date("date")?,
+        // Null on several of this table's kinds, measured 2026-08-10 on
+        // `listed`, `relation` and both ticker-change rows. `decimal` refuses a
+        // null rather than reading it as zero, which is what keeps a row
+        // carrying no amount from becoming a dividend of nothing.
+        amount: row.decimal("value")?,
+    })
 }
 
 fn decode_price(row: &NativeRow<'_>) -> Result<SepRow, SourceError> {

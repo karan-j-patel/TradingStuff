@@ -89,7 +89,10 @@ fn t8_actions_round_trip_across_every_kind() {
         stock.clone(),
         split.clone(),
     ];
-    assert_eq!(write_actions(shuffled, &path).expect("write"), 6);
+    assert_eq!(
+        write_actions(shuffled, &path, "synthetic").expect("write"),
+        6
+    );
 
     let read = read_actions(&path).expect("read");
     assert_eq!(read.len(), 6, "a same-day dividend pair was dropped");

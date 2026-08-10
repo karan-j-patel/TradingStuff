@@ -25,6 +25,7 @@ use std::process::ExitCode;
 use clap::Subcommand;
 
 mod probe;
+mod probe_actions;
 mod universe;
 
 /// What `ingest` can do beyond reporting presence.
@@ -38,6 +39,12 @@ pub enum Action {
     /// Reads a handful of rows and prints them. Writes nothing, counts no
     /// trial, and draws no conclusion.
     ProbeSep,
+
+    /// Report what the corporate actions table ships
+    ///
+    /// Reads a handful of rows and prints them. Writes nothing, counts no
+    /// trial, and draws no conclusion.
+    ProbeActions,
 
     /// Build the research universe from the whole security master
     ///
@@ -98,6 +105,7 @@ const UNCHOSEN: &[(&str, &str)] = &[(
 pub fn run(action: Option<&Action>) -> anyhow::Result<ExitCode> {
     match action {
         Some(Action::ProbeSep) => return probe::run(),
+        Some(Action::ProbeActions) => return probe_actions::run(),
         Some(Action::FetchUniverse { out }) => return universe::run(out),
         None => {}
     }

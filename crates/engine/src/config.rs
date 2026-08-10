@@ -81,6 +81,19 @@ pub struct BacktestConfig {
     /// reproducible against a specific list of securities rather than against
     /// whatever the sampling rule happens to produce today.
     pub universe_sha256: String,
+
+    /// SHA-256 of the corporate actions file, when one was supplied.
+    ///
+    /// `None` means the run applied no cash dividends and its returns are price
+    /// returns. That is a different strategy from the same signal run with
+    /// dividends, not the same one measured better, so it hashes differently
+    /// and counts as its own trial.
+    ///
+    /// Hashed over the file's bytes, so refetching an actions file that has not
+    /// changed produces the same hash. The failure direction that leaves is
+    /// over-counting trials when a refetch changes a byte without changing what
+    /// the run sees, which is the safe way round.
+    pub actions_sha256: Option<String>,
 }
 
 impl BacktestConfig {
@@ -101,6 +114,7 @@ impl BacktestConfig {
             sample_modulus: ingest::universe::SAMPLE_MODULUS,
             sample_residue: ingest::universe::SAMPLE_RESIDUE,
             universe_sha256: universe_sha256.into(),
+            actions_sha256: None,
         }
     }
 
