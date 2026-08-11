@@ -39,6 +39,7 @@ const WIRE_STOCKS: &str = "stocks";
 const WIRE_TICKERS: &str = "tickers";
 const WIRE_FUNDAMENTALS: &str = "fundamentals";
 const WIRE_ACTIONS: &str = "actions";
+const WIRE_DAILY: &str = "daily";
 
 // --- a transport that answers by table --------------------------------------
 
@@ -945,4 +946,193 @@ fn n4_a_clean_actions_walk_keeps_every_row() {
 #[test]
 fn n4_the_actions_table_name_matches_the_wire() {
     assert_eq!(native_tables::ACTIONS, WIRE_ACTIONS);
+}
+
+// --- N6: the daily metrics table and market capitalisation -----------------
+//
+// Every row below is fabricated. The vendor's own figures live only in the
+// gitignored probe output, because the licence covers rows wherever they are
+// written. What is copied here is the *shape* the probe measured: keyed
+// objects, a bare number to one decimal place, and the three fields the fetch
+// asks for.
+
+/// One fabricated daily row, in the shape the probe measured.
+fn daily_row(date: &str, marketcap: &str) -> String {
+    format!(r#"{{"ticker":"ZZTOP","date":"{date}","marketcap":{marketcap}}}"#)
+}
+
+fn marketcaps(
+    client: &SharadarClient,
+) -> Result<Vec<crate::marketcap::MarketCapRecord>, SourceError> {
+    client.fetch_marketcaps(
+        &AssetKey {
+            ticker: "ZZTOP".into(),
+            permanent: Some(PermanentId::Sharadar(194_897)),
+        },
+        range("2024-12-30", "2024-12-31"),
+    )
+}
+
+/// N6. A vendor daily row becomes a curated record with its figure untouched.
+///
+/// The figure is asserted as text as well as as a number. Numeric equality
+/// alone would accept a value that arrived with different digits and compared
+/// equal after some rescaling cancelled out, and the digits are the whole point
+/// of a store-as-shipped dataset.
+#[test]
+fn n6_a_daily_row_decodes_into_a_market_cap_record() {
+    let fake = Fake::serving(
+        WIRE_DAILY,
+        &[envelope(&[daily_row("2024-12-31", "1234567.8")])],
+    );
+
+    let records = marketcaps(&client(&fake)).expect("the measured envelope decodes");
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].date, date("2024-12-31"));
+    assert_eq!(records[0].marketcap, decimal("1234567.8"));
+    assert_eq!(
+        records[0].marketcap.normalize().to_string(),
+        "1234567.8",
+        "the shipped digits changed on the way in"
+    );
+    // The caller's key, not one rebuilt from the ticker string.
+    assert_eq!(
+        records[0].asset.permanent,
+        Some(PermanentId::Sharadar(194_897))
+    );
+    assert_eq!(records[0].source, super::PROVIDER);
+}
+
+/// N6. The daily table name matches the wire, compared against a literal.
+///
+/// This fetch accepts an empty answer, measured, so the wrong-case trap cannot
+/// be caught behaviourally the way `n3_zero_rows_for_a_known_live_ticker_is_an_error`
+/// catches it for prices. It is worse here than for actions: `metrics` is a
+/// *live* table on this host carrying plausible daily figures and no market cap
+/// column at all, so a wrong name can return real rows rather than none. This
+/// assertion is the only thing standing in front of that.
+#[test]
+fn n6_the_daily_table_name_matches_the_wire() {
+    assert_eq!(native_tables::DAILY, WIRE_DAILY);
+}
+
+/// N6. The fetch asks the daily table for exactly the three fields it stores.
+///
+/// The host honours `fields`, measured, so sending the trimmed list is what
+/// keeps seven valuation ratios this platform does not use off the wire. The
+/// assertion is on the URL because that is the only place the request is
+/// visible before it leaves.
+#[test]
+fn n6_the_fetch_asks_the_daily_table_for_only_what_it_stores() {
+    let fake = Fake::serving(WIRE_DAILY, &[envelope(&[daily_row("2024-12-31", "1.5")])]);
+    marketcaps(&client(&fake)).expect("decodes");
+
+    let seen = fake.seen.borrow();
+    let url = seen.first().expect("one request was made");
+    assert_eq!(
+        table_of(url),
+        WIRE_DAILY,
+        "the request went elsewhere: {url}"
+    );
+    assert!(
+        url.contains("fields="),
+        "no fields parameter was sent: {url}"
+    );
+    assert!(
+        url.contains("marketcap"),
+        "the stored field was not asked for: {url}"
+    );
+    assert!(
+        !url.contains("evebitda"),
+        "the fetch asked for a ratio it does not store: {url}"
+    );
+}
+
+/// N6. A name the daily table has no rows for is an empty success.
+///
+/// Measured 2026-08-11: a security served with prices had no daily row in the
+/// same window and none on any date, because this table's history starts later
+/// than the price table's. `require_rows` here would turn every such name into
+/// a failure, so the empty answer is a fact rather than a fault.
+#[test]
+fn n6_a_name_with_no_daily_rows_is_an_empty_success() {
+    // No body queued for the daily table, so the fake answers exactly as this
+    // host does: HTTP 200 and no rows.
+    let fake = Fake::serving(
+        "something-else",
+        &[envelope(&[daily_row("2024-12-31", "1.5")])],
+    );
+
+    let records = marketcaps(&client(&fake)).expect("an empty answer is not an error here");
+    assert!(records.is_empty());
+}
+
+/// N6. A null figure is refused rather than read as zero.
+///
+/// This table says "no figure" by omitting the row, so a null that does arrive
+/// is a row that changed shape. Reading it as zero would claim a company is
+/// worth nothing, and a zero market cap propagates into a weight of zero rather
+/// than into an error anybody would see.
+#[test]
+fn n6_a_null_marketcap_is_malformed_rather_than_zero() {
+    let fake = Fake::serving(
+        WIRE_DAILY,
+        &[envelope(&[
+            r#"{"ticker":"ZZTOP","date":"2024-12-31","marketcap":null}"#.to_string(),
+        ])],
+    );
+
+    let error = marketcaps(&client(&fake)).expect_err("a null figure must not decode");
+    assert!(matches!(error, SourceError::Malformed { .. }));
+    assert!(
+        error.to_string().contains("marketcap"),
+        "the error must name the field: {error}"
+    );
+}
+
+/// N6. A row missing any of the three requested fields is malformed.
+///
+/// The request names exactly these three, so a row arriving without one is the
+/// host disagreeing with what it was asked for. The ticker is the interesting
+/// case: nothing downstream reads it, since identity comes from the caller's
+/// key, so a decoder that never touched it would accept a response that had
+/// silently stopped filtering by name.
+#[test]
+fn n6_a_row_missing_a_requested_field_is_malformed() {
+    for row in [
+        r#"{"date":"2024-12-31","marketcap":1234.5}"#,
+        r#"{"ticker":"ZZTOP","marketcap":1234.5}"#,
+        r#"{"ticker":"ZZTOP","date":"2024-12-31"}"#,
+    ] {
+        let fake = Fake::serving(WIRE_DAILY, &[envelope(&[row.to_string()])]);
+        let error = match marketcaps(&client(&fake)) {
+            Err(error) => error,
+            Ok(decoded) => {
+                panic!("a row missing a requested field decoded anyway: {row}, got {decoded:?}")
+            }
+        };
+        assert!(
+            matches!(error, SourceError::Malformed { .. }),
+            "expected Malformed for {row}, got {error:?}"
+        );
+    }
+}
+
+/// N6. A name the vendor declines is an ordinary error, not a credential fault.
+///
+/// This is the seam the universe walk branches on: it records a decline against
+/// the name and carries on, and stops only for `Unauthorized`, which is one
+/// fault affecting every remaining name. The 401-to-`Unauthorized` mapping
+/// itself is shared by every fetch on this client and is pinned by
+/// `s6_a_401_is_unauthorized_and_is_not_retried`.
+#[test]
+fn n6_a_declined_name_is_not_an_unauthorized() {
+    let fake = Fake::failing("connection refused");
+
+    let error = marketcaps(&client(&fake)).expect_err("an unreachable host must error");
+    assert!(
+        !matches!(error, SourceError::Unauthorized { .. }),
+        "a transport failure must not read as a credential fault, or the walk aborts: {error}"
+    );
 }

@@ -41,6 +41,7 @@ mod codec;
 mod delistings;
 mod enums;
 mod error;
+mod marketcap;
 mod prices;
 
 #[cfg(test)]
@@ -49,6 +50,9 @@ mod tests;
 pub use actions::{read_actions, write_actions};
 pub use delistings::{read_delistings, write_delistings};
 pub use error::CurateError;
+pub use marketcap::{
+    MarketCapProvenance, UNITS, UNITS_KEY, marketcap_provenance, read_marketcap, write_marketcap,
+};
 pub use prices::{
     BASIS, BASIS_KEY, Provenance, SOURCE_KEY, prices_provenance, read_prices, write_prices,
 };
@@ -91,6 +95,10 @@ pub fn delistings_path(data_root: &Path) -> PathBuf {
 
 pub fn actions_path(data_root: &Path) -> PathBuf {
     data_root.join("curated/actions/actions.parquet")
+}
+
+pub fn marketcap_path(data_root: &Path) -> PathBuf {
+    data_root.join("curated/marketcap/marketcap.parquet")
 }
 
 /// How many rejected records to name before the message stops being useful.

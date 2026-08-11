@@ -43,11 +43,12 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
-use ingest::provider::SourceError;
 use ingest::sharadar::{NATIVE_STOCKS_TABLE, SharadarClient};
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 use serde_json::Value;
+
+use super::probe_wire::{ask, decimal_field, field, print_rows, rows_of, shift};
 
 /// Candidate spellings of the actions table, most likely first.
 ///
@@ -597,95 +598,4 @@ fn ratio(numerator: Decimal, denominator: Decimal) -> String {
         None => "-".to_string(),
         Some(value) => value.round_dp(RATIO_DP).to_string(),
     }
-}
-
-/// One request, printed as it was asked and as it came back.
-///
-/// `show_raw` is false only for the market-wide census, whose body is hundreds
-/// of rows on one line. Every request that answers a mapping question prints
-/// its body verbatim, because a decode written against a paraphrase of a
-/// response is a decode written against nothing.
-///
-/// A failure prints and returns `None` so the remaining questions still get
-/// asked, with one exception: a rejected credential ends the run. Repeating a
-/// request whose credential is wrong produces the same answer and spends
-/// goodwill against a host that publishes no rate limits.
-fn ask(
-    client: &SharadarClient,
-    table: &str,
-    params: &[(&str, String)],
-    show_raw: bool,
-) -> anyhow::Result<Option<String>> {
-    let shown: Vec<String> = params
-        .iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect();
-    println!("  request: table={table} {}", shown.join(" "));
-
-    match client.native_raw(table, params) {
-        Ok(body) => {
-            if show_raw {
-                println!("  raw: {body}");
-            }
-            Ok(Some(body))
-        }
-        Err(error @ SourceError::Unauthorized { .. }) => Err(error.into()),
-        Err(error) => {
-            println!("  error: {error}");
-            Ok(None)
-        }
-    }
-}
-
-/// The `data` array of a native response, or nothing if it has none.
-fn rows_of(body: &str) -> Vec<Value> {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|envelope| envelope.get("data").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
-}
-
-/// Print every field of every row, without knowing any field's name.
-///
-/// Naming the fields here would be assuming the answer to question 2. The map
-/// `serde_json` parses into is ordered by key, so the columns line up across
-/// rows without this file deciding what they are.
-fn print_rows(rows: &[Value]) {
-    for row in rows {
-        let Some(fields) = row.as_object() else {
-            println!("  a row that is not an object: {row}");
-            continue;
-        };
-        let shown: Vec<String> = fields
-            .iter()
-            .map(|(name, value)| format!("{name}={}", scalar(value)))
-            .collect();
-        println!("  {}", shown.join("  "));
-    }
-}
-
-/// One field of one row as text, or nothing if it is absent.
-fn field(row: &Value, name: &str) -> Option<String> {
-    row.get(name).map(scalar)
-}
-
-/// One field of one row as a `Decimal`, parsed from the exact token the vendor
-/// sent.
-///
-/// `arbitrary_precision` keeps a JSON number as its original text, so this
-/// never routes a price through `f64`.
-fn decimal_field(row: &Value, name: &str) -> Option<Decimal> {
-    Decimal::from_str_exact(&field(row, name)?).ok()
-}
-
-/// A JSON value as a bare token, so a row of values reads as values.
-fn scalar(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
-fn shift(date: Date, days: i64) -> anyhow::Result<Date> {
-    Ok(date.checked_add(jiff::SignedDuration::from_hours(days * 24))?)
 }

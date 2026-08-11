@@ -91,8 +91,8 @@ enum Command {
 
     /// Report which data providers this machine is configured for
     ///
-    /// With no action it reports presence and nothing else. `probe-sep` and
-    /// `probe-actions` read a few vendor rows and print them.
+    /// With no action it reports presence and nothing else. `probe-sep`,
+    /// `probe-actions` and `probe-daily` read a few vendor rows and print them.
     Ingest {
         #[command(subcommand)]
         action: Option<ingest::Action>,

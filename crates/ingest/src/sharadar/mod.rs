@@ -132,6 +132,24 @@ pub(crate) mod columns {
         /// `cli ingest probe-actions`, which is the only reason this spelling
         /// is trusted rather than guessed.
         pub(crate) const ACTIONS: &str = "actions";
+        /// Daily metrics, which is where market capitalisation lives. Verified
+        /// live 2026-08-11 by `cli ingest probe-daily`.
+        ///
+        /// # The decoy this name has, which the others do not
+        ///
+        /// The probe asked four candidate spellings rather than stopping at the
+        /// first that answered, and that is why this constant is right.
+        /// `dailymetrics` and `dailymetric` are answered with HTTP 401, the
+        /// ordinary way this host says a name is unknown. But `metrics` is a
+        /// **live table** that answers with plausible daily figures: beta,
+        /// moving averages, trailing returns, a price. It carries no market cap
+        /// at all.
+        ///
+        /// So a wrong guess here does not fail loudly. It returns real-looking
+        /// rows from a real table that happens not to have the column, and the
+        /// first thing anyone would notice is a decoder complaining about a
+        /// missing field, some distance from the cause.
+        pub(crate) const DAILY: &str = "daily";
     }
 }
 

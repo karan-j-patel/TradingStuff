@@ -26,6 +26,8 @@ use clap::Subcommand;
 
 mod probe;
 mod probe_actions;
+mod probe_daily;
+mod probe_wire;
 mod universe;
 
 /// What `ingest` can do beyond reporting presence.
@@ -45,6 +47,19 @@ pub enum Action {
     /// Reads a handful of rows and prints them. Writes nothing, counts no
     /// trial, and draws no conclusion.
     ProbeActions,
+
+    /// Report what the daily metrics table ships, market capitalisation first
+    ///
+    /// Reads a handful of rows and prints them. Writes nothing, counts no
+    /// trial, and draws no conclusion.
+    ProbeDaily {
+        /// Where the curated prices live, for the share-count derivation.
+        ///
+        /// Optional. Without it the derivation falls back to the vendor's own
+        /// price table, which answers the same question one source short
+        #[arg(long)]
+        data_root: Option<String>,
+    },
 
     /// Build the research universe from the whole security master
     ///
@@ -106,6 +121,7 @@ pub fn run(action: Option<&Action>) -> anyhow::Result<ExitCode> {
     match action {
         Some(Action::ProbeSep) => return probe::run(),
         Some(Action::ProbeActions) => return probe_actions::run(),
+        Some(Action::ProbeDaily { data_root }) => return probe_daily::run(data_root.as_deref()),
         Some(Action::FetchUniverse { out }) => return universe::run(out),
         None => {}
     }

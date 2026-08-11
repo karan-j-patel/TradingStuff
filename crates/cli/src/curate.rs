@@ -35,14 +35,15 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use clap::Subcommand;
 use ingest::parquet::{
-    actions_path, delistings_path, prices_path, write_actions, write_delistings, write_prices,
+    actions_path, delistings_path, marketcap_path, prices_path, write_actions, write_delistings,
+    write_marketcap, write_prices,
 };
 use ingest::provider::{AdjustedPriceSource, DateRange, SourceError};
 use ingest::sharadar::SharadarClient;
 use ingest::universe::{self, FetchOutcome};
 use ingest::{
-    ActionRecord, AdjustedBar, AssetKey, Delisting, validate_action, validate_adjusted,
-    validate_delisting,
+    ActionRecord, AdjustedBar, AssetKey, Delisting, MarketCapRecord, validate_action,
+    validate_adjusted, validate_delisting, validate_marketcap,
 };
 use jiff::civil::Date;
 use serde::de::DeserializeOwned;
@@ -110,6 +111,32 @@ pub enum Dataset {
         #[arg(long)]
         from: Option<Date>,
         /// Last date to fetch, inclusive. Only with --fetch
+        #[arg(long)]
+        to: Option<Date>,
+        #[arg(long, help = DATA_ROOT_HELP)]
+        data_root: Option<String>,
+    },
+
+    /// Curate daily market capitalisation, straight from the provider
+    ///
+    /// Fetch only. There is no JSONL door here, because nothing produces one
+    /// of these files by hand and a figure typed by an operator would carry no
+    /// units anybody could check
+    Marketcap {
+        /// Fetch from the configured provider. Required, and named anyway so
+        /// the command reads the same as its siblings
+        #[arg(long)]
+        fetch: bool,
+        /// Universe file to fetch, as written by `ingest fetch-universe`.
+        ///
+        /// Fetches one security at a time and tolerates a vendor declining any
+        /// one of them
+        #[arg(long)]
+        universe: Option<String>,
+        /// First date to fetch, inclusive
+        #[arg(long)]
+        from: Option<Date>,
+        /// Last date to fetch, inclusive
         #[arg(long)]
         to: Option<Date>,
         #[arg(long, help = DATA_ROOT_HELP)]
@@ -187,7 +214,147 @@ pub fn run(dataset: &Dataset) -> anyhow::Result<ExitCode> {
             // "an operator handed us a file" is itself the provenance.
             curate_actions(read_jsonl(input)?, &path, "operator-jsonl")
         }
+        Dataset::Marketcap {
+            fetch,
+            universe,
+            from,
+            to,
+            data_root,
+        } => {
+            let root = ingest::parquet::data_root(data_root.as_deref());
+            let path = marketcap_path(&root);
+
+            let Some(universe) = universe else {
+                anyhow::bail!(
+                    "marketcap needs --universe, so every record carries the vendor's \
+                     permanent identifier rather than a ticker string"
+                );
+            };
+            if !*fetch {
+                anyhow::bail!("--universe describes what to fetch, so it needs --fetch");
+            }
+            fetch_marketcap_from_universe(universe, *from, *to, &path)
+        }
     }
+}
+
+/// Fetch daily market capitalisation for every security in a universe file.
+///
+/// Mirrors [`fetch_actions_from_universe`] down to the conduct: serial, one
+/// security at a time, a decline recorded against the name and the walk
+/// continued, and a rejected credential fatal because that is one fault
+/// affecting every remaining request.
+///
+/// The empty case is counted rather than treated as a decline, and it is not
+/// rare. Measured 2026-08-11, this table's history starts around 1998-12-01 and
+/// a security that stopped trading before then is served with prices and with
+/// no market cap row at all. A name returning nothing is a fact about coverage,
+/// so it is reported separately from a name the vendor refused.
+///
+/// The universe file is not rewritten. Its `outcome` field records what the
+/// price fetch served, and overwriting that with market cap counts would lose
+/// the record of which names have prices.
+fn fetch_marketcap_from_universe(
+    universe_path: &str,
+    from: Option<Date>,
+    to: Option<Date>,
+    path: &Path,
+) -> anyhow::Result<ExitCode> {
+    let (from, to) = match (from, to) {
+        (Some(from), Some(to)) => (from, to),
+        _ => anyhow::bail!("--fetch needs --from and --to"),
+    };
+    let range = DateRange::new(from, to)?;
+
+    let text = std::fs::read_to_string(universe_path)
+        .with_context(|| format!("reading {universe_path}"))?;
+    let entries = universe::from_jsonl(&text)?;
+    if entries.is_empty() {
+        anyhow::bail!("{universe_path} holds no securities, so there is nothing to fetch");
+    }
+
+    let source = SharadarClient::native_from_env()?;
+    let total = entries.len();
+    println!("Fetching daily market capitalisation for {total} securities from {from} to {to}");
+    println!("  figures are stored exactly as the vendor ships them, in millions of US dollars,");
+    println!("  and the units are recorded in the file's metadata rather than converted here");
+    println!("  serial, one security at a time, and a decline is recorded rather than fatal");
+    println!();
+
+    let mut records: Vec<MarketCapRecord> = Vec::new();
+    let mut declined = 0usize;
+    let mut no_coverage = 0usize;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let position = index + 1;
+        let ticker = &entry.asset.ticker;
+
+        match source.fetch_marketcaps(&entry.asset, range) {
+            Ok(fetched) if fetched.is_empty() => {
+                no_coverage += 1;
+            }
+            Ok(fetched) => {
+                println!("  [{position}/{total}] {ticker}: {} days", fetched.len());
+                records.extend(fetched);
+            }
+            Err(SourceError::Unauthorized { provider }) => {
+                anyhow::bail!(
+                    "{provider} rejected the credentials at security {position} of {total}, so \
+                     every remaining fetch would fail the same way. Nothing was written."
+                );
+            }
+            Err(error) => {
+                declined += 1;
+                println!("  [{position}/{total}] {ticker}: DECLINED, {error}");
+            }
+        }
+    }
+
+    println!();
+    println!("Fetch outcomes");
+    println!(
+        "  securities with a market cap: {}",
+        total - no_coverage - declined
+    );
+    println!("  securities the table has no rows for: {no_coverage}");
+    println!("  declined:                             {declined}");
+    println!();
+
+    curate_marketcap(records, path, source.name())
+}
+
+/// Validate and write the market cap dataset.
+///
+/// The pre-validation is for reporting quality only. `write_marketcap` is the
+/// guard and checks the same rules again, which is what stops a caller that
+/// skips this command from writing a figure the domain rejects.
+fn curate_marketcap(
+    rows: Vec<MarketCapRecord>,
+    path: &Path,
+    source: &str,
+) -> anyhow::Result<ExitCode> {
+    let total = rows.len();
+
+    let rejected: Vec<(&MarketCapRecord, _)> = rows
+        .iter()
+        .filter_map(|row| validate_marketcap(row).err().map(|reason| (row, reason)))
+        .collect();
+    if !rejected.is_empty() {
+        return Err(refuse(total, total - rejected.len(), &rejected, |row| {
+            format!("{} {}", row.asset.ticker, row.date)
+        }));
+    }
+
+    let written = write_marketcap(rows, path, source)
+        .with_context(|| format!("writing {}", path.display()))?;
+
+    println!("Curated {written} market cap rows from {total} records.");
+    println!("  accepted: {written}");
+    println!("  rejected: 0");
+    println!("  written:  {}", path.display());
+    println!("  source:   {source}");
+    println!("  units:    {}", ingest::parquet::UNITS);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Fetch cash dividends for every security in a universe file.

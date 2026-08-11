@@ -74,6 +74,7 @@ use super::tickers::TickerRow;
 use super::{MAX_PAGES, malformed, refused};
 use crate::actions::{ActionRecord, CorporateAction, DividendKind};
 use crate::adjusted::AdjustedBar;
+use crate::marketcap::MarketCapRecord;
 use crate::provider::{AdjustedPriceSource, DateRange, SourceError};
 use crate::schema::{AssetKey, CloseKind, PermanentId, SessionScope};
 use rust_decimal::Decimal;
@@ -84,6 +85,15 @@ const TICKER_FIELDS: &str =
 
 /// The fields the price probe asks for.
 const PRICE_FIELDS: &str = "ticker,date,open,high,low,close,volume,closeunadj,lastupdated";
+
+/// The fields the market cap fetch asks for.
+///
+/// Trimmed to exactly what is stored, plus the ticker the decoder checks is
+/// still there. Measured 2026-08-11: this host honours the parameter, returning
+/// three keys against the ten the daily table otherwise sends. The seven left
+/// behind are valuation ratios this platform computes itself from inputs it can
+/// see, and a ratio taken on trust is a number nobody can reproduce.
+const MARKETCAP_FIELDS: &str = "ticker,date,marketcap";
 
 /// The fields the actions fetch asks for.
 ///
@@ -522,6 +532,75 @@ impl SharadarClient {
             .collect())
     }
 
+    /// Fetch daily market capitalisation for one ticker over an inclusive
+    /// window.
+    ///
+    /// # Why an empty answer is not an error here
+    ///
+    /// [`require_rows`] guards the price fetch, because a security with a
+    /// listing has prices and an empty answer there means the request was
+    /// wrong. This table is different, and the difference was measured rather
+    /// than assumed. On 2026-08-11 `cli ingest probe-daily` asked the daily
+    /// table for CUTC1 over the window ending on its last trading day and got
+    /// `{"count":0,"data":[]}`, while the price table served seven rows for the
+    /// same name and the same window. The daily table has no row for that name
+    /// on any date. Its history starts around 1998-12-01, and a security
+    /// delisted before that is served with prices and with no market cap at
+    /// all.
+    ///
+    /// So an empty answer here is an ordinary fact about a security rather than
+    /// a fault, and `require_rows` would turn every such name into a failure.
+    /// Do not add it back.
+    ///
+    /// That leaves the wrong-case table trap uncovered by a runtime check, so
+    /// it is covered by a test instead, exactly as the actions fetch is.
+    /// `the_daily_table_name_matches_the_wire` pins the constant against the
+    /// literal spelling written out separately, so a miscased constant fails
+    /// the suite rather than quietly reporting that no security has a size.
+    pub(crate) fn native_daily_marketcap_window(
+        &self,
+        ticker: &str,
+        from: Date,
+        to: Date,
+    ) -> Result<Vec<DailyRow>, SourceError> {
+        check_query_safe("ticker", ticker)?;
+
+        let params = [
+            ("ticker", ticker.to_string()),
+            ("from", from.to_string()),
+            ("to", to.to_string()),
+            ("fields", MARKETCAP_FIELDS.to_string()),
+        ];
+
+        self.fetch_native(native_tables::DAILY, &params, "date", decode_marketcap)
+    }
+
+    /// Market capitalisation for one security, as domain records.
+    ///
+    /// The asset key is the caller's, not one rebuilt from the ticker string,
+    /// so the vendor's permanent identifier survives into the record exactly as
+    /// it does through the price and dividend fetches. A curated row keyed on a
+    /// label companies change would fail to match its own price series the day
+    /// the ticker moved.
+    pub fn fetch_marketcaps(
+        &self,
+        asset: &AssetKey,
+        range: DateRange,
+    ) -> Result<Vec<MarketCapRecord>, SourceError> {
+        let rows = self.native_daily_marketcap_window(&asset.ticker, range.start(), range.end())?;
+        Ok(rows
+            .into_iter()
+            .map(|row| MarketCapRecord {
+                asset: asset.clone(),
+                date: row.date,
+                // As shipped. Nothing on this path multiplies, and the units
+                // travel as a label on the curated file.
+                marketcap: row.marketcap,
+                source: super::PROVIDER.to_string(),
+            })
+            .collect())
+    }
+
     /// One native request, returned as the host sent it.
     ///
     /// For probes, which exist to find out how a table is shaped before any
@@ -637,6 +716,41 @@ fn decode_action(row: &NativeRow<'_>) -> Result<ActionRow, SourceError> {
         // null rather than reading it as zero, which is what keeps a row
         // carrying no amount from becoming a dividend of nothing.
         amount: row.decimal("value")?,
+    })
+}
+
+/// One decoded vendor daily row.
+///
+/// Private to this module, like [`SepRow`] and [`ActionRow`]. What leaves the
+/// crate is the domain record, so no caller ends up holding a vendor row's idea
+/// of what a field means, and in particular of what units it is in.
+pub(crate) struct DailyRow {
+    pub(crate) date: Date,
+    pub(crate) marketcap: Decimal,
+}
+
+/// Decode one daily row, refusing anything that is not a usable figure.
+///
+/// All three fields are required and none of them is tolerated missing. The
+/// request names exactly these three in its `fields` parameter, so a row
+/// arriving without one is the host disagreeing with what it was asked for
+/// rather than a security with a gap.
+///
+/// A null `marketcap` is an error rather than a skip or a zero. `decimal`
+/// refuses a null, and that refusal is the point: this table says "no figure"
+/// by omitting the row entirely, measured on 2026-08-11 across 1500 rows in
+/// which no null, zero, or negative appeared. So a null that does arrive is a
+/// row that changed shape, and reading it as zero would claim a company is
+/// worth nothing.
+fn decode_marketcap(row: &NativeRow<'_>) -> Result<DailyRow, SourceError> {
+    // Read and discarded. The ticker is not stored from here, because the
+    // caller's AssetKey carries identity, but asking for it is what makes a
+    // response that dropped the column an error rather than a silent success.
+    row.text("ticker")?;
+
+    Ok(DailyRow {
+        date: row.date("date")?,
+        marketcap: row.decimal("marketcap")?,
     })
 }
 
