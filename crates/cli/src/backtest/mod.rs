@@ -70,16 +70,32 @@ impl<'a> Strategy<'a> {
     /// does not depend on the argument attributes staying correct.
     pub fn from_args(
         config: Option<&'a str>,
+        variant: Option<&'a str>,
         prices: Option<&'a PathBuf>,
         universe: Option<&'a PathBuf>,
         actions: Option<&'a PathBuf>,
     ) -> anyhow::Result<Self> {
         match (config, prices, universe) {
-            // `--actions` is refused here rather than ignored. A run that was
-            // asked for dividends and quietly produced price returns is the
-            // exact mislabelling the engine's wiring guard exists to prevent,
-            // and it would arrive with a hash saying no actions were used.
-            (Some(config), None, None) if actions.is_none() => Ok(Strategy::Declared(config)),
+            // `--actions` and `--variant` are refused here rather than ignored.
+            // A run that was asked for dividends and quietly produced price
+            // returns is the exact mislabelling the engine's wiring guard
+            // exists to prevent, and it would arrive with a hash saying no
+            // actions were used. A variant asked for and never applied is the
+            // same failure: the recorded hash would be the config string's, and
+            // nothing in the log would say a variant had been requested.
+            //
+            // Clap does not catch either one, which was measured rather than
+            // assumed. Both arguments carry `requires = "prices"`, and
+            // `--config` conflicts with `--prices`, which suppresses the
+            // requirement instead of failing on it.
+            (Some(config), None, None) if actions.is_none() && variant.is_none() => {
+                Ok(Strategy::Declared(config))
+            }
+            (Some(_), None, None) if variant.is_some() => anyhow::bail!(
+                "--variant selects a robustness variant of a program the engine runs, and \
+                 --config declares a configuration with no engine behind it, so the two \
+                 cannot go together"
+            ),
             (Some(_), None, None) => anyhow::bail!(
                 "--actions applies cash dividends to an engine run, and --config declares a \
                  configuration with no engine behind it, so the two cannot go together"
@@ -110,13 +126,23 @@ pub enum Outcome {
     Failed(String),
 }
 
-pub fn run(trials_path: &str, program: &str, strategy: &Strategy<'_>) -> anyhow::Result<ExitCode> {
+/// `variant` is a robustness rerun of `program` rather than a program of its
+/// own, so it never reaches the recorded program string. It changes the
+/// configuration, and therefore the hash, which is where the log carries the
+/// difference. Keeping it out of the program string is what makes the scoped
+/// `N` of rule 2 group a hypothesis with its own reruns.
+pub fn run(
+    trials_path: &str,
+    program: &str,
+    variant: Option<&str>,
+    strategy: &Strategy<'_>,
+) -> anyhow::Result<ExitCode> {
     let mut log = TrialLog::load(trials_path)
         .with_context(|| format!("loading the trial log from {trials_path}"))?;
 
     // Nothing between here and the append may use `?` on the engine. See the
     // module documentation.
-    let (config_hash, outcome) = evaluate(program, strategy);
+    let (config_hash, outcome) = evaluate(program, variant, strategy);
 
     let sharpe = match &outcome {
         // Rounded once, here, and this exact value is both recorded and
@@ -149,19 +175,24 @@ pub fn run(trials_path: &str, program: &str, strategy: &Strategy<'_>) -> anyhow:
 }
 
 /// Run whatever was asked for, converting every failure into a value.
-fn evaluate(program: &str, strategy: &Strategy<'_>) -> (ConfigHash, Outcome) {
+fn evaluate(
+    program: &str,
+    variant: Option<&str>,
+    strategy: &Strategy<'_>,
+) -> (ConfigHash, Outcome) {
     match strategy {
         Strategy::Declared(config) => (ConfigHash::of(config.as_bytes()), Outcome::Declared),
         Strategy::Momentum {
             prices,
             universe,
             actions,
-        } => engine_run(program, prices, universe, *actions),
+        } => engine_run(program, variant, prices, universe, *actions),
     }
 }
 
 fn engine_run(
     program: &str,
+    variant: Option<&str>,
     prices: &Path,
     universe: &Path,
     actions: Option<&Path>,
@@ -173,7 +204,8 @@ fn engine_run(
     let unresolved = || {
         ConfigHash::of(
             format!(
-                "{program} unresolved prices={} universe={}",
+                "{program} variant={} unresolved prices={} universe={}",
+                variant.unwrap_or("none"),
                 prices.display(),
                 universe.display()
             )
@@ -181,7 +213,7 @@ fn engine_run(
         )
     };
 
-    let (config, members) = match resolve(program, universe, actions) {
+    let (config, members) = match resolve(program, variant, universe, actions) {
         Ok(resolved) => resolved,
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
@@ -211,6 +243,7 @@ fn engine_run(
 /// exists to make exactly that impossible.
 fn resolve(
     program: &str,
+    variant: Option<&str>,
     universe: &Path,
     actions: Option<&Path>,
 ) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>)> {
@@ -232,12 +265,23 @@ fn resolve(
         }
     };
 
-    let config = BacktestConfig::for_program(program, sha256).ok_or_else(|| {
+    let config = BacktestConfig::for_program(program, variant, sha256).ok_or_else(|| {
+        // Listed from the registry rather than written out, so a pair added
+        // there cannot go missing from the message that says what is runnable.
+        let runnable: Vec<String> = engine::RUNNABLE
+            .iter()
+            .map(|(program, variant)| match variant {
+                None => format!("--program {program}"),
+                Some(variant) => format!("--program {program} --variant {variant}"),
+            })
+            .collect();
         anyhow::anyhow!(
-            "--program {program} names no configuration this engine can run. The engine \
-             programs are {} and {}",
-            engine::PROGRAM,
-            engine::LOWVOL_PROGRAM
+            "--program {program}{} names no configuration this engine can run. The \
+             runnable combinations are: {}",
+            variant
+                .map(|v| format!(" --variant {v}"))
+                .unwrap_or_default(),
+            runnable.join("; ")
         )
     })?;
 

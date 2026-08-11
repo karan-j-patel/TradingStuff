@@ -44,7 +44,7 @@ fn a_trial_is_recorded_even_though_no_engine_ran() {
     let path = temp_log("recorded");
     let before = TrialLog::load(&path).expect("load").lifetime_count();
 
-    run(&path, "test-program", &declared("some=config")).expect("backtest runs");
+    run(&path, "test-program", None, &declared("some=config")).expect("backtest runs");
 
     let log = TrialLog::load(&path).expect("reload");
     assert_eq!(
@@ -63,8 +63,8 @@ fn a_trial_is_recorded_even_though_no_engine_ran() {
 #[test]
 fn consecutive_trials_stay_linked() {
     let path = temp_log("linked");
-    run(&path, "prog", &declared("first")).expect("first runs");
-    run(&path, "prog", &declared("second")).expect("second runs");
+    run(&path, "prog", None, &declared("first")).expect("first runs");
+    run(&path, "prog", None, &declared("second")).expect("second runs");
 
     let log = TrialLog::load(&path).expect("reload");
     assert_eq!(log.lifetime_count(), 2);
@@ -82,7 +82,7 @@ fn a_non_ascii_program_is_refused_and_writes_nothing() {
     let path = temp_log("nonascii");
     let before = fs::read_to_string(&path).expect("read");
 
-    let error = run(&path, "\u{3bc}structure-v1", &declared("some=config"))
+    let error = run(&path, "\u{3bc}structure-v1", None, &declared("some=config"))
         .expect_err("a non-ASCII program must be refused");
 
     // `{:#}` prints the whole chain of causes, which is what the binary
@@ -105,8 +105,8 @@ fn a_non_ascii_program_is_refused_and_writes_nothing() {
 #[test]
 fn the_configuration_reaches_the_log_as_a_hash() {
     let path = temp_log("confighash");
-    run(&path, "prog", &declared("lookback=12")).expect("runs");
-    run(&path, "prog", &declared("lookback=6")).expect("runs");
+    run(&path, "prog", None, &declared("lookback=12")).expect("runs");
+    run(&path, "prog", None, &declared("lookback=6")).expect("runs");
 
     let text = fs::read_to_string(&path).expect("read");
     let hashes: Vec<&str> = text
@@ -223,6 +223,7 @@ fn e7_a_run_appends_one_entry_carrying_the_engine_sharpe() {
     let code = run(
         &path,
         engine::PROGRAM,
+        None,
         &Strategy::Momentum {
             prices: &prices,
             universe: &universe,
@@ -268,6 +269,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
     run(
         &path,
         engine::PROGRAM,
+        None,
         &Strategy::Momentum {
             prices: &prices,
             universe: &universe,
@@ -292,6 +294,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
     run(
         &path,
         engine::PROGRAM,
+        None,
         &Strategy::Momentum {
             prices: &prices,
             universe: &universe,
@@ -340,6 +343,7 @@ fn an_engine_failure_still_records_a_trial() {
     let code = run(
         &path,
         engine::PROGRAM,
+        None,
         &Strategy::Momentum {
             prices: &missing,
             universe: &universe,
@@ -378,6 +382,7 @@ fn an_unresolvable_configuration_still_records_a_trial() {
     run(
         &path,
         engine::PROGRAM,
+        None,
         &Strategy::Momentum {
             prices: &missing,
             universe: &missing,
@@ -400,27 +405,39 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
     let actions = PathBuf::from("actions.parquet");
 
     assert!(matches!(
-        Strategy::from_args(Some("free text"), None, None, None),
+        Strategy::from_args(Some("free text"), None, None, None, None),
         Ok(Strategy::Declared(_))
     ));
     assert!(matches!(
-        Strategy::from_args(None, Some(&prices), Some(&universe), None),
+        Strategy::from_args(None, None, Some(&prices), Some(&universe), None),
         Ok(Strategy::Momentum { actions: None, .. })
     ));
     assert!(matches!(
-        Strategy::from_args(None, Some(&prices), Some(&universe), Some(&actions)),
+        Strategy::from_args(None, None, Some(&prices), Some(&universe), Some(&actions)),
         Ok(Strategy::Momentum {
             actions: Some(_),
             ..
         })
     ));
     for bad in [
-        Strategy::from_args(None, None, None, None),
-        Strategy::from_args(None, Some(&prices), None, None),
-        Strategy::from_args(Some("free text"), Some(&prices), Some(&universe), None),
+        Strategy::from_args(None, None, None, None, None),
+        Strategy::from_args(None, None, Some(&prices), None, None),
+        Strategy::from_args(
+            Some("free text"),
+            None,
+            Some(&prices),
+            Some(&universe),
+            None,
+        ),
         // Dividends with no engine behind them. Accepting this would record a
         // hash saying an actions file was used by a run that never opened one.
-        Strategy::from_args(Some("free text"), None, None, Some(&actions)),
+        Strategy::from_args(Some("free text"), None, None, None, Some(&actions)),
+        // A variant with no engine behind it, which clap does not refuse on its
+        // own. Measured 2026-08-11: `--config` conflicts with `--prices`, and
+        // that conflict suppresses the `requires = "prices"` on `--variant`,
+        // so the pair reached this function and a Declared trial was recorded
+        // naming a variant that nothing ever applied.
+        Strategy::from_args(Some("free text"), Some("price-floor-10"), None, None, None),
     ] {
         assert!(bad.is_err(), "an impossible combination was accepted");
     }
@@ -471,6 +488,7 @@ fn e8g_the_recorded_hash_moves_when_actions_are_supplied() {
         let code = run(
             &path,
             engine::PROGRAM,
+            None,
             &Strategy::Momentum {
                 prices: &prices,
                 universe: &universe,
@@ -565,6 +583,7 @@ fn the_program_selects_the_configuration_the_run_is_recorded_under() {
         let code = run(
             &path,
             program,
+            None,
             &Strategy::Momentum {
                 prices: &prices,
                 universe: &universe,
@@ -610,6 +629,7 @@ fn an_unknown_program_produces_no_figure() {
     let code = run(
         &path,
         "momentum-v99",
+        None,
         &Strategy::Momentum {
             prices: &prices,
             universe: &universe,
@@ -631,6 +651,204 @@ fn an_unknown_program_produces_no_figure() {
          configuration after all"
     );
     log.verify().expect("the chain verifies");
+}
+
+// --- E10, the variant door and the registry ----------------------------------
+
+/// E10c. A variant reaches the log as the bare program, with the difference
+/// carried by the configuration hash.
+///
+/// This is the division of labour rule 2 needs. Scoped `N` counts trials within
+/// a research program, and a robustness rerun of one hypothesis belongs to that
+/// hypothesis. Recording `lowvol-v0 --variant liquidity-screened` under a
+/// program string of its own would give each variant a scoped `N` of one and a
+/// deflated Sharpe computed as though no search had happened.
+///
+/// The recorded hash is checked against a configuration written out here rather
+/// than against "not the base hash". A resolution that handed back some third
+/// configuration would differ from the base too.
+#[test]
+fn e10c_a_variant_reaches_the_log_as_the_bare_program() {
+    let path = temp_log("variant-door");
+    let (prices, universe) = fixture_dataset("variant-door");
+    let sha256 = rigor::hash_bytes(fs::read_to_string(&universe).expect("read").as_bytes());
+
+    for variant in [None, Some(engine::VARIANT_LIQUIDITY_SCREENED)] {
+        let code = run(
+            &path,
+            engine::LOWVOL_PROGRAM,
+            variant,
+            &Strategy::Momentum {
+                prices: &prices,
+                universe: &universe,
+                actions: None,
+            },
+        )
+        .expect("the backtest runs");
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "{variant:?} produced no figure, so the hashes below would differ only \
+             because one run failed"
+        );
+    }
+
+    let log = TrialLog::load(&path).expect("reload");
+    log.verify().expect("the chain verifies");
+    let entries = log.trials();
+    assert_eq!(entries.len(), 2);
+
+    for entry in entries {
+        assert_eq!(
+            entry.program,
+            engine::LOWVOL_PROGRAM,
+            "a variant was recorded under a program string of its own, so the \
+             scoped N no longer groups the variants of one hypothesis"
+        );
+    }
+    assert!(
+        entries.iter().all(|entry| entry.sharpe.is_some()),
+        "a run recorded no figure"
+    );
+    assert_ne!(
+        entries[0].config_hash, entries[1].config_hash,
+        "the variant recorded as the same configuration as the base run"
+    );
+    assert_eq!(
+        entries[1].config_hash,
+        BacktestConfig {
+            liquidity_floor_fraction: Some(Decimal::from_str_exact("0.2").expect("literal")),
+            ..BacktestConfig::lowvol_v0(&sha256)
+        }
+        .config_hash()
+        .expect("hashes")
+        .as_str(),
+        "the recorded hash is not lowvol-v0 with the liquidity screen engaged"
+    );
+}
+
+/// E10d. Every runnable pair records a distinct configuration under the bare
+/// program name.
+///
+/// The walk is over `engine::RUNNABLE` rather than over a list written here, so
+/// a pair added to the registry later is covered by this test the moment it
+/// exists rather than when somebody remembers. That is the point of the
+/// registry: the class of near-miss it closes is a configuration reachable from
+/// the command line that nothing ever checked records as its own trial.
+#[test]
+fn e10d_every_runnable_pair_hashes_distinctly() {
+    let path = temp_log("registry-walk");
+    let (prices, universe) = fixture_dataset("registry-walk");
+
+    for (program, variant) in engine::RUNNABLE {
+        let code = run(
+            &path,
+            program,
+            *variant,
+            &Strategy::Momentum {
+                prices: &prices,
+                universe: &universe,
+                actions: None,
+            },
+        )
+        .expect("the backtest runs");
+        assert_eq!(
+            code,
+            ExitCode::SUCCESS,
+            "--program {program} --variant {variant:?} is in the registry and \
+             produced no figure, so the door and the registry disagree"
+        );
+    }
+
+    let log = TrialLog::load(&path).expect("reload");
+    log.verify().expect("the chain verifies");
+    let entries = log.trials();
+    assert_eq!(
+        entries.len(),
+        engine::RUNNABLE.len(),
+        "the walk recorded a different number of trials from the registry's length"
+    );
+
+    // Without this the distinctness assertion below would pass for the
+    // uninteresting reason that a failed run hashes over its request instead of
+    // over a configuration.
+    assert!(
+        entries.iter().all(|entry| entry.sharpe.is_some()),
+        "a run in the walk produced no figure, so its recorded hash is the \
+         unresolved-request fallback rather than a configuration"
+    );
+
+    for (entry, (program, _)) in entries.iter().zip(engine::RUNNABLE) {
+        assert_eq!(
+            entry.program, *program,
+            "a variant was recorded under something other than its bare program"
+        );
+    }
+
+    let mut hashes: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry.config_hash.as_str())
+        .collect();
+    hashes.sort_unstable();
+    let distinct = hashes.len();
+    hashes.dedup();
+    assert_eq!(
+        hashes.len(),
+        distinct,
+        "two runnable pairs recorded the same configuration hash, so the trial \
+         log cannot tell them apart"
+    );
+}
+
+/// E10e. A variant the engine has no configuration for is refused rather than
+/// run as the base program.
+///
+/// Both shapes of the mistake: a variant nobody defined, and a real variant
+/// asked for on a program that has none. The trial is still recorded, with no
+/// Sharpe, because the attempt happened.
+#[test]
+fn e10e_an_unknown_variant_produces_no_figure() {
+    let path = temp_log("unknown-variant");
+    let (prices, universe) = fixture_dataset("unknown-variant");
+
+    let attempts = [
+        (engine::LOWVOL_PROGRAM, "price-floor-99"),
+        // A variant that exists, on a program it is not a variant of.
+        (engine::PROGRAM, engine::VARIANT_LIQUIDITY_SCREENED),
+    ];
+    for (program, variant) in attempts {
+        let code = run(
+            &path,
+            program,
+            Some(variant),
+            &Strategy::Momentum {
+                prices: &prices,
+                universe: &universe,
+                actions: None,
+            },
+        )
+        .expect("a refused configuration is still a completed command");
+        assert_eq!(
+            code,
+            ExitCode::FAILURE,
+            "--program {program} --variant {variant} ran something and called it \
+             a success"
+        );
+    }
+
+    let log = TrialLog::load(&path).expect("reload");
+    log.verify().expect("the chain verifies");
+    let entries = log.trials();
+    assert_eq!(
+        entries.len(),
+        attempts.len(),
+        "each attempt is still a trial"
+    );
+    assert!(
+        entries.iter().all(|entry| entry.sharpe.is_none()),
+        "an unrecognised variant produced a figure, so it resolved to some \
+         configuration after all"
+    );
 }
 
 // --- E9e, the N caveat -------------------------------------------------------

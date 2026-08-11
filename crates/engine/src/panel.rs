@@ -199,6 +199,42 @@ impl Series {
         end.saturating_sub(start)
     }
 
+    /// Dollar volume, `close * volume`, for every bar in `(after, through]`.
+    ///
+    /// # Why the product is on a consistent basis
+    ///
+    /// The vendor documents `volume` as "adjusted for stock splits and stock
+    /// dividends", the same adjustment its `close` carries, recorded verbatim
+    /// at `ContinuationDocs/2026-08-09-sharadar-research.md` line 174. A split
+    /// therefore divides the price and multiplies the share count by the same
+    /// factor, so the product is unchanged by it and equals as-traded dollar
+    /// volume up to that identity. Mixing an adjusted price with an unadjusted
+    /// count would put a 3-for-1 split straight into the number and make a
+    /// name look three times as thin the day it split.
+    ///
+    /// # Why the window is half-open at the start
+    ///
+    /// The same convention as [`Series::bars_in`], because the coverage rule is
+    /// what guarantees this window is populated at all. A screen counting a
+    /// different set of days from the rule that admitted the name would make
+    /// the guarantee mean nothing.
+    pub fn dollar_volumes_in(
+        &self,
+        after: Date,
+        through: Date,
+    ) -> Result<Vec<Decimal>, EngineError> {
+        let start = self.bars.partition_point(|bar| bar.date <= after);
+        let end = self.bars.partition_point(|bar| bar.date <= through);
+        self.bars[start..end.max(start)]
+            .iter()
+            .map(|bar| {
+                bar.close
+                    .checked_mul(bar.volume)
+                    .ok_or_else(|| EngineError::math("computing a daily dollar volume"))
+            })
+            .collect()
+    }
+
     /// Every date this security has a bar on, for tests and diagnostics.
     pub fn dates(&self) -> impl Iterator<Item = Date> + '_ {
         self.bars.iter().map(|bar| bar.date)

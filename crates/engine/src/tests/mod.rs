@@ -21,6 +21,7 @@ mod dividends;
 mod eligibility;
 mod hashing;
 mod lowvol;
+mod screens;
 
 use ingest::actions::{ActionRecord, CorporateAction, DividendKind};
 use ingest::adjusted::AdjustedBar;

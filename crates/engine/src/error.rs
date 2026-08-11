@@ -69,6 +69,13 @@ pub enum EngineError {
         panel_has_dividends: bool,
     },
 
+    #[error(
+        "the liquidity floor fraction {fraction} is outside [0, 1), and a screen that \
+         removes every eligible name or a negative number of them is a configuration \
+         mistake rather than a screen"
+    )]
+    LiquidityFractionOutOfRange { fraction: rust_decimal::Decimal },
+
     #[error("encoding the configuration for hashing failed")]
     ConfigEncode(#[source] serde_json::Error),
 }

@@ -33,6 +33,34 @@ pub const PROGRAM: &str = "momentum-v0";
 /// like the other's search had been spent on it.
 pub const LOWVOL_PROGRAM: &str = "lowvol-v0";
 
+/// The variant of [`LOWVOL_PROGRAM`] that raises the price floor to $10.
+pub const VARIANT_PRICE_FLOOR_10: &str = "price-floor-10";
+
+/// The variant of [`LOWVOL_PROGRAM`] that drops the least liquid names.
+pub const VARIANT_LIQUIDITY_SCREENED: &str = "liquidity-screened";
+
+/// Every `(program, variant)` pair this engine has a configuration for.
+///
+/// # Why a registry rather than only a `match`
+///
+/// The near-miss this closes is a configuration that is reachable through the
+/// command line without anything having asserted that it records as its own
+/// trial. A `match` arm added on its own is runnable the moment it compiles and
+/// nothing notices. Listing the pairs as data instead means one test can walk
+/// every pair that exists, today and after the next one is added, and check
+/// that each records a distinct configuration hash under the bare program name.
+///
+/// [`BacktestConfig::for_program`] refuses anything absent from here, so the
+/// registry is the door rather than a description of it. A pair added to the
+/// match without being listed is unrunnable; a pair listed without a match arm
+/// resolves to nothing and the walk fails on it.
+pub const RUNNABLE: &[(&str, Option<&str>)] = &[
+    (PROGRAM, None),
+    (LOWVOL_PROGRAM, None),
+    (LOWVOL_PROGRAM, Some(VARIANT_PRICE_FLOOR_10)),
+    (LOWVOL_PROGRAM, Some(VARIANT_LIQUIDITY_SCREENED)),
+];
+
 /// Which signal decides what is held.
 ///
 /// # Why an enum in the hashed configuration rather than two binaries
@@ -98,6 +126,26 @@ pub struct BacktestConfig {
     #[serde(with = "rust_decimal::serde::str")]
     pub min_coverage: Decimal,
 
+    /// Fraction of the otherwise-eligible names to drop at each rebalance, from
+    /// the thin end of a ranking on median daily dollar volume over the
+    /// formation window.
+    ///
+    /// `None` applies no screen at all, which is what every program except the
+    /// `liquidity-screened` variant carries, and that path is byte-identical to
+    /// the code from before this field existed.
+    ///
+    /// # Why the field is optional rather than a fraction of zero
+    ///
+    /// A zero fraction would exclude nothing and would be the same run, so the
+    /// two are not distinguishable by their results. They are distinguishable
+    /// by their hashes, and `None` keeps two questions separate: whether a
+    /// screen applies at all, and how much it removes. Adding the field still
+    /// moves every previously recorded hash, `None` or not, because the
+    /// canonical form gains a key; that is inherent to hashing the whole
+    /// struct and is accepted, same as when `strategy` was added.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub liquidity_floor_fraction: Option<Decimal>,
+
     /// Charged on traded notional, per side. Ten basis points.
     ///
     /// Source: a conservative all-in estimate for large-cap US equities,
@@ -138,15 +186,53 @@ pub struct BacktestConfig {
 }
 
 impl BacktestConfig {
-    /// The configuration a research program identifier resolves to.
+    /// The configuration a `(program, variant)` pair resolves to.
     ///
-    /// `None` for anything else. An unrecognised program running momentum by
-    /// default would record a trial under a name that does not describe what
-    /// ran, which is the one thing the config hash exists to make impossible.
-    pub fn for_program(program: &str, universe_sha256: impl Into<String>) -> Option<Self> {
-        match program {
-            PROGRAM => Some(Self::momentum_v0(universe_sha256)),
-            LOWVOL_PROGRAM => Some(Self::lowvol_v0(universe_sha256)),
+    /// `None` for any pair absent from [`RUNNABLE`]. An unrecognised program or
+    /// variant running the base configuration by default would record a trial
+    /// under a name that does not describe what ran, which is the one thing the
+    /// config hash exists to make impossible.
+    ///
+    /// A variant is a robustness rerun of one hypothesis rather than a new
+    /// hypothesis, so it is recorded under the bare program string and the
+    /// difference between it and the base run lives in the config hash. That is
+    /// what keeps the scoped `N` of rule 2 grouping the variants together.
+    pub fn for_program(
+        program: &str,
+        variant: Option<&str>,
+        universe_sha256: impl Into<String>,
+    ) -> Option<Self> {
+        // The registry is the door, checked before anything is built. A pair
+        // the match below could serve but the registry does not list is refused
+        // here, so adding a configuration without listing it leaves it
+        // unrunnable rather than quietly reachable and untested.
+        if !RUNNABLE
+            .iter()
+            .any(|(runnable, listed)| *runnable == program && *listed == variant)
+        {
+            return None;
+        }
+        match (program, variant) {
+            (PROGRAM, None) => Some(Self::momentum_v0(universe_sha256)),
+            (LOWVOL_PROGRAM, None) => Some(Self::lowvol_v0(universe_sha256)),
+            // Double the literature's $5, labelled as stricter-than-literature
+            // robustness rather than as a replication of it. The $5 floor is
+            // already in the base configuration, so rerunning at $5 would be
+            // the identical config and would not be a second trial.
+            (LOWVOL_PROGRAM, Some(VARIANT_PRICE_FLOOR_10)) => Some(Self {
+                price_floor: Decimal::new(10, 0),
+                ..Self::lowvol_v0(universe_sha256)
+            }),
+            // A fifth of the eligible names dropped from the thin end. One
+            // value, not a sweep: every extra fraction is another trial and
+            // rule 2 counts them all.
+            (LOWVOL_PROGRAM, Some(VARIANT_LIQUIDITY_SCREENED)) => Some(Self {
+                liquidity_floor_fraction: Some(Decimal::new(2, 1)),
+                ..Self::lowvol_v0(universe_sha256)
+            }),
+            // Listed in the registry with nothing to build. Unreachable while
+            // the two agree, and the registry walk in the CLI tests is what
+            // notices when they stop agreeing.
             _ => None,
         }
     }
@@ -163,6 +249,7 @@ impl BacktestConfig {
             quintile_divisor: 5,
             price_floor: Decimal::new(5, 0),
             min_coverage: Decimal::new(80, 2),
+            liquidity_floor_fraction: None,
             cost_per_side: Decimal::new(10, 4),
             random_seed: 20_260_810,
             random_draws: 20,
@@ -210,6 +297,9 @@ impl BacktestConfig {
             price_floor: self.price_floor.normalize(),
             min_coverage: self.min_coverage.normalize(),
             cost_per_side: self.cost_per_side.normalize(),
+            liquidity_floor_fraction: self
+                .liquidity_floor_fraction
+                .map(|fraction| fraction.normalize()),
             ..self.clone()
         };
         let value = serde_json::to_value(&normalised).map_err(EngineError::ConfigEncode)?;

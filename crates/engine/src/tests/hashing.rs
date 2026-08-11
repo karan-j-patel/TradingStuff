@@ -51,6 +51,13 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
             cost_per_side: rust_decimal::Decimal::new(20, 4),
             ..base.clone()
         },
+        // Engaging the liquidity screen changes which names the ranking sees,
+        // so the screened variant and the base run are two trials rather than
+        // one measured twice.
+        BacktestConfig {
+            liquidity_floor_fraction: Some(rust_decimal::Decimal::new(2, 1)),
+            ..base.clone()
+        },
         BacktestConfig {
             random_seed: 1,
             ..base.clone()

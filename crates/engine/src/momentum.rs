@@ -45,6 +45,7 @@ use rust_decimal::Decimal;
 
 use crate::config::{BacktestConfig, Strategy};
 use crate::error::EngineError;
+use crate::liquidity;
 use crate::lowvol;
 use crate::panel::Panel;
 
@@ -135,6 +136,35 @@ pub fn rebalance_at(
         eligible.push(position);
         signals.push((position, value));
     }
+
+    // The tradability screen, after every other eligibility rule and before the
+    // ranking. Order matters and this is the order the spec fixes: the fraction
+    // is a fraction of the names that were otherwise going to be ranked, so
+    // screening first would take a fifth of a larger set, and screening after
+    // the quintile was chosen would remove names from the portfolio rather than
+    // from the field it was chosen out of.
+    //
+    // `None` leaves both vectors exactly as they were, which is what keeps
+    // every program except one byte-identical to the code from before this
+    // existed.
+    let (eligible, signals) = match config.liquidity_floor_fraction {
+        None => (eligible, signals),
+        Some(fraction) => {
+            let kept = liquidity::screened(panel, fraction, &eligible, window_start, window_end)?;
+            // `kept` is ascending, so a binary search decides membership in
+            // logarithmic time. `Vec::contains` would be a linear scan inside a
+            // loop over the same vector, which is quadratic in the number of
+            // eligible names and this runs at every rebalance.
+            let survives = |position: &usize| kept.binary_search(position).is_ok();
+            (
+                eligible.iter().copied().filter(survives).collect(),
+                signals
+                    .into_iter()
+                    .filter(|(position, _)| survives(position))
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
 
     // Best signal first, where momentum wants the largest and low volatility
     // wants the smallest. Ties break on the security's position, which is

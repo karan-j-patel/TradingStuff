@@ -66,6 +66,11 @@ enum Command {
         /// letters, digits, and - _ . only, at most 64 characters
         #[arg(long)]
         program: String,
+        /// Robustness variant of the program, when it has one. Recorded under
+        /// the bare program name, so the variants of one hypothesis share a
+        /// scoped N, with the difference carried by the configuration hash
+        #[arg(long, requires = "prices")]
+        variant: Option<String>,
         /// A strategy configuration with no engine behind it, hashed into the
         /// log. Records the attempt and reports no Sharpe
         #[arg(long, conflicts_with_all = ["prices", "universe"])]
@@ -110,17 +115,19 @@ fn main() -> ExitCode {
         Command::Backtest {
             trials,
             program,
+            variant,
             config,
             prices,
             universe,
             actions,
         } => backtest::Strategy::from_args(
             config.as_deref(),
+            variant.as_deref(),
             prices.as_ref(),
             universe.as_ref(),
             actions.as_ref(),
         )
-        .and_then(|strategy| backtest::run(&trials, &program, &strategy)),
+        .and_then(|strategy| backtest::run(&trials, &program, variant.as_deref(), &strategy)),
         Command::Ingest { action } => ingest::run(action.as_ref()),
         Command::Curate { dataset } => curate::run(&dataset),
     };
