@@ -163,6 +163,29 @@ impl Series {
         (found.year() == month_end.year() && found.month() == month_end.month()).then_some(close)
     }
 
+    /// Closes on every bar dated in `[from, through]`, ascending.
+    ///
+    /// # Why this one is closed at both ends
+    ///
+    /// [`Series::bars_in`] counts `(after, through]`, which is the right shape
+    /// for a coverage denominator: it counts the days that elapsed between two
+    /// endpoint month-ends. A series of daily *returns* over that same span
+    /// needs one more price than that, because the first return's denominator
+    /// is the close at `from` itself. Closed at both ends, this returns exactly
+    /// the prices those returns are computed from, and the number of returns it
+    /// yields equals the number [`Series::bars_in`] reports.
+    ///
+    /// Bounded by `through`, so like every other accessor here it cannot see
+    /// past the date it is told.
+    pub fn closes_spanning(&self, from: Date, through: Date) -> Vec<Decimal> {
+        let start = self.bars.partition_point(|bar| bar.date < from);
+        let end = self.bars.partition_point(|bar| bar.date <= through);
+        self.bars[start..end.max(start)]
+            .iter()
+            .map(|bar| bar.close)
+            .collect()
+    }
+
     /// How many bars fall in `(after, through]`.
     ///
     /// Half-open at the start so that a window described by its two endpoint

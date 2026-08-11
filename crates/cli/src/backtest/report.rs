@@ -74,8 +74,11 @@ pub fn print_outcome(
 
 fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option<Decimal>) {
     let strategy = &report.strategy;
+    // The research program rather than a hard-coded strategy name. There is
+    // more than one strategy now, and a heading that named the wrong one would
+    // mislabel every figure under it.
     println!(
-        "Momentum v0, {} to {}, {} monthly observations",
+        "{program}, {} to {}, {} monthly observations",
         report.first_rebalance, report.last_rebalance, report.months
     );
     println!("  universe file sha256:  {}", report.config.universe_sha256);
@@ -106,7 +109,7 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
     println!("  delisting exits:         {}", strategy.delisting_exits);
     println!();
 
-    print_dsr(log, program, report);
+    println!("{}", dsr_block(log, program, report));
 
     println!("Baselines, rule 5.");
     println!(
@@ -150,13 +153,31 @@ pub(super) fn caveat_block(report: &Report) -> &'static str {
     engine::caveats(report.dividends_applied)
 }
 
+/// What `N` is, and is not, printed beside every DSR figure.
+///
+/// This is not conditional on the strategy or on whether a figure exists. A
+/// deflated Sharpe corrects for the trials *this log* has counted, and a factor
+/// lifted out of the published literature arrives having already survived a
+/// search nobody here ran. Against a small local `N` the correction is
+/// therefore too gentle, and the direction of that error is flattering, which
+/// is the direction worth stating out loud.
+pub(super) const N_CAVEAT: &str = "\
+N counts this log's trials, not the field's. A factor taken from the
+  literature arrives with the field's thousands of tests behind it, and a
+  small N here flatters it.";
+
 /// The Deflated Sharpe Ratio against both trial counts, rule 2.
+///
+/// Returned as text rather than printed, so a test can assert on what the block
+/// says without capturing stdout. That is the same reason [`caveat_block`]
+/// exists, and it is the only way the caveat's presence is testable at all.
 ///
 /// `observed` is the **monthly** Sharpe. Feeding the annualised figure produces
 /// a confident wrong probability with nothing visibly failing, which is why the
 /// annualised value is not in scope in this function.
-fn print_dsr(log: &TrialLog, program: &str, report: &Report) {
-    println!("Deflated Sharpe Ratio. Rule 2 requires both readings, always.");
+pub(super) fn dsr_block(log: &TrialLog, program: &str, report: &Report) -> String {
+    let mut lines =
+        vec!["Deflated Sharpe Ratio. Rule 2 requires both readings, always.".to_string()];
     for (label, sharpes, trials) in [
         (
             "scoped  ",
@@ -176,17 +197,22 @@ fn print_dsr(log: &TrialLog, program: &str, report: &Report) {
             }
             .probability()
         });
-        match probability {
-            Some(value) => println!("  {label} (N={trials}):  {}", show(value)),
+        lines.push(match probability {
+            Some(value) => format!("  {label} (N={trials}):  {}", show(value)),
             // A missing figure is printed as missing. Substituting a number
             // here would be inventing the one thing the whole crate exists to
             // stop being invented.
-            None => println!(
+            None => format!(
                 "  {label} (N={trials}):  no figure exists. The DSR needs at least two \
                  recorded Sharpes to estimate their spread, at least two return periods, \
                  and a positive variance term. One of those is absent."
             ),
-        }
+        });
     }
-    println!();
+    // Unconditional, and inside the block rather than beside the call, so that
+    // no caller can print a DSR figure without it.
+    lines.push(String::new());
+    lines.push(format!("  {N_CAVEAT}"));
+    lines.push(String::new());
+    lines.join("\n")
 }

@@ -27,7 +27,9 @@
 //!
 //! - [`config`] holds every constant the run is defined by, and hashes them.
 //! - [`panel`] groups bars by security and owns the trading calendar.
-//! - [`momentum`] computes the signal and applies the eligibility rules.
+//! - [`momentum`] computes the momentum signal, applies the eligibility rules,
+//!   and forms the rebalance for whichever strategy is configured.
+//! - [`lowvol`] computes the low-volatility signal.
 //! - [`portfolio`] turns weights and prices into returns, with costs.
 //! - [`baseline`] runs the comparisons rule 5 requires.
 //! - [`run`] is the monthly loop and the report it produces.
@@ -35,6 +37,7 @@
 pub mod baseline;
 pub mod config;
 pub mod error;
+pub mod lowvol;
 pub mod momentum;
 pub mod panel;
 pub mod portfolio;
@@ -43,7 +46,7 @@ pub mod run;
 #[cfg(test)]
 mod tests;
 
-pub use config::{BacktestConfig, PROGRAM};
+pub use config::{BacktestConfig, LOWVOL_PROGRAM, PROGRAM, Strategy};
 pub use error::EngineError;
 pub use panel::Panel;
 pub use run::{CAVEATS, CAVEATS_WITH_DIVIDENDS, Report, backtest, caveats};

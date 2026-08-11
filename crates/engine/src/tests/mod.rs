@@ -20,6 +20,7 @@ mod baselines;
 mod dividends;
 mod eligibility;
 mod hashing;
+mod lowvol;
 
 use ingest::actions::{ActionRecord, CorporateAction, DividendKind};
 use ingest::adjusted::AdjustedBar;
@@ -77,6 +78,37 @@ pub fn month_ends() -> [Date; 6] {
     ]
 }
 
+/// Eighteen trading days, three per month, whose last day in each month is
+/// exactly the corresponding entry of [`month_ends`].
+///
+/// Volatility is estimated from daily returns, so a fixture built from
+/// month-ends alone would give the estimator one observation per window and no
+/// dispersion to measure. Three days a month is the smallest count that leaves
+/// a formation window of one month with three daily returns, which is two more
+/// than the `n - 1` denominator needs.
+pub fn trading_days() -> [Date; 18] {
+    [
+        date(2020, 1, 29),
+        date(2020, 1, 30),
+        date(2020, 1, 31),
+        date(2020, 2, 26),
+        date(2020, 2, 27),
+        date(2020, 2, 28),
+        date(2020, 3, 27),
+        date(2020, 3, 30),
+        date(2020, 3, 31),
+        date(2020, 4, 28),
+        date(2020, 4, 29),
+        date(2020, 4, 30),
+        date(2020, 5, 27),
+        date(2020, 5, 28),
+        date(2020, 5, 29),
+        date(2020, 6, 26),
+        date(2020, 6, 29),
+        date(2020, 6, 30),
+    ]
+}
+
 /// A configuration with a shortened lead-in, and every other constant as the
 /// real run uses it.
 pub fn test_config(lookback: usize) -> BacktestConfig {
@@ -84,6 +116,41 @@ pub fn test_config(lookback: usize) -> BacktestConfig {
         signal_lookback_months: lookback,
         ..BacktestConfig::momentum_v0("0".repeat(64))
     }
+}
+
+/// The same configuration, ranking on volatility instead.
+///
+/// Built by overriding [`test_config`] rather than by shortening
+/// [`BacktestConfig::lowvol_v0`], so that a test of the selection rule fails
+/// only when the selection rule is wrong. Whether `lowvol_v0` itself carries
+/// the right strategy is a separate question, and `e9d` is the test that asks
+/// it.
+pub fn lowvol_config(lookback: usize) -> BacktestConfig {
+    BacktestConfig {
+        strategy: crate::config::Strategy::LowVolatility,
+        ..test_config(lookback)
+    }
+}
+
+/// Build a panel from one price path per security over [`trading_days`].
+///
+/// Panics if a path is not eighteen long, because a short path would silently
+/// shorten a formation window and change what the test measures.
+pub fn daily_panel(series: &[(AssetKey, [&str; 18])]) -> Panel {
+    let days = trading_days();
+    let paths: Vec<(AssetKey, Vec<(Date, Decimal)>)> = series
+        .iter()
+        .map(|(key, closes)| {
+            (
+                key.clone(),
+                days.iter()
+                    .zip(closes)
+                    .map(|(day, close)| (*day, dec(close)))
+                    .collect(),
+            )
+        })
+        .collect();
+    panel_of(&paths)
 }
 
 /// Build a panel from `(asset, [(date, close)])` pairs, with the unadjusted

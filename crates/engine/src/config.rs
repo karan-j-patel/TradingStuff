@@ -11,8 +11,8 @@
 //! that is left out of the canonical form is not possible, because the
 //! canonical form is built from the serialisation rather than written by hand.
 //!
-//! The defaults are in [`BacktestConfig::momentum_v0`], which is the only
-//! configuration this round runs.
+//! The defaults are in [`BacktestConfig::momentum_v0`] and
+//! [`BacktestConfig::lowvol_v0`], one per research program.
 
 use std::collections::BTreeMap;
 
@@ -22,10 +22,44 @@ use serde::Serialize;
 
 use crate::error::EngineError;
 
-/// The research program identifier this configuration belongs to.
+/// The research program identifier the momentum configuration belongs to.
 pub const PROGRAM: &str = "momentum-v0";
 
-/// One configuration of the momentum backtest.
+/// The research program identifier the low-volatility configuration belongs to.
+///
+/// A separate program, not a variant of momentum, because rule 2 scopes `N` to
+/// a research program and these are two different hypotheses about what
+/// predicts returns. Filing them together would make each one's scoped N look
+/// like the other's search had been spent on it.
+pub const LOWVOL_PROGRAM: &str = "lowvol-v0";
+
+/// Which signal decides what is held.
+///
+/// # Why an enum in the hashed configuration rather than two binaries
+///
+/// The eligibility rules, the cost model, the accounting, and both baselines
+/// are identical between the two strategies, and a second code path for them
+/// would be comparing two implementations rather than two hypotheses. What
+/// differs is one function and one sort direction. Putting the choice in the
+/// configuration means it reaches the trial log's config hash automatically,
+/// so a low-volatility run cannot be recorded as if it were a momentum run.
+///
+/// Serialised as a snake_case string, so the canonical form carries
+/// `"strategy":"momentum"` or `"strategy":"low_volatility"` rather than an
+/// object, matching the case of every other token in the canonical form.
+/// `Copy` because it is a two-variant tag and threading a borrow of it
+/// through the rebalance loop would buy nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Strategy {
+    /// Hold the highest quintile by trailing return over the formation window.
+    Momentum,
+    /// Hold the LOWEST quintile by the sample standard deviation of daily
+    /// returns over the formation window.
+    LowVolatility,
+}
+
+/// One configuration of the backtest.
 ///
 /// `Decimal` fields carry `#[serde(with = "rust_decimal::serde::str")]` for the
 /// same reason `rigor::TrialEntry::sharpe` does. The struct feeds a hash, and a
@@ -33,18 +67,25 @@ pub const PROGRAM: &str = "momentum-v0";
 /// configuration hash differently.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BacktestConfig {
-    /// Months of price history the signal spans, counting back from the
-    /// rebalance month inclusive. Twelve, with one skipped, is the
-    /// literature-standard 12-1 momentum.
+    /// Which signal ranks the eligible names, and which end of the ranking is
+    /// held.
+    pub strategy: Strategy,
+
+    /// Months of price history the formation window spans, counting back from
+    /// the rebalance month inclusive. Twelve, with one skipped, is the
+    /// literature-standard 12-1 momentum, and the same twelve months are the
+    /// volatility estimation window for the low-volatility strategy.
     pub signal_lookback_months: usize,
 
     /// Months immediately before the rebalance that the signal ignores. One,
     /// which drops the short-term reversal that contaminates a raw 12-month
-    /// return.
+    /// return, and which for either strategy keeps the rebalance month itself
+    /// out of the formation window.
     pub signal_skip_months: usize,
 
-    /// The portfolio holds the top `1 / quintile_divisor` of eligible names by
-    /// signal. Five, hence "quintile".
+    /// The portfolio holds `1 / quintile_divisor` of the eligible names, taken
+    /// from whichever end of the ranking [`Strategy`] names. Five, hence
+    /// "quintile".
     pub quintile_divisor: usize,
 
     /// Minimum unadjusted close on the rebalance date, in dollars. Sub-$5
@@ -97,12 +138,26 @@ pub struct BacktestConfig {
 }
 
 impl BacktestConfig {
-    /// The one configuration this round runs.
+    /// The configuration a research program identifier resolves to.
+    ///
+    /// `None` for anything else. An unrecognised program running momentum by
+    /// default would record a trial under a name that does not describe what
+    /// ran, which is the one thing the config hash exists to make impossible.
+    pub fn for_program(program: &str, universe_sha256: impl Into<String>) -> Option<Self> {
+        match program {
+            PROGRAM => Some(Self::momentum_v0(universe_sha256)),
+            LOWVOL_PROGRAM => Some(Self::lowvol_v0(universe_sha256)),
+            _ => None,
+        }
+    }
+
+    /// The momentum configuration.
     ///
     /// `Decimal::new(value, scale)` reads as `value * 10^-scale`, so
     /// `Decimal::new(10, 4)` is 0.0010, which is ten basis points.
     pub fn momentum_v0(universe_sha256: impl Into<String>) -> Self {
         Self {
+            strategy: Strategy::Momentum,
             signal_lookback_months: 12,
             signal_skip_months: 1,
             quintile_divisor: 5,
@@ -115,6 +170,20 @@ impl BacktestConfig {
             sample_residue: ingest::universe::SAMPLE_RESIDUE,
             universe_sha256: universe_sha256.into(),
             actions_sha256: None,
+        }
+    }
+
+    /// The low-volatility configuration.
+    ///
+    /// Every constant is momentum's, deliberately. The formation window, the
+    /// eligibility rules, the quintile, the cost, and the baselines are held
+    /// fixed so that the difference between the two trials is the signal and
+    /// nothing else. `signal_lookback_months` of 12 with one skipped is the
+    /// twelve months of daily returns ending at the month before the rebalance.
+    pub fn lowvol_v0(universe_sha256: impl Into<String>) -> Self {
+        Self {
+            strategy: Strategy::LowVolatility,
+            ..Self::momentum_v0(universe_sha256)
         }
     }
 

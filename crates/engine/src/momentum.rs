@@ -27,12 +27,25 @@
 //! [`crate::panel::Series`] has no accessor that returns a bar without being
 //! told the latest date it may look at. The rebalance month's own return never
 //! enters the signal, which is the property `e1_lookahead` holds.
+//!
+//! # Why [`rebalance_at`] lives in the momentum module and serves both
+//! strategies
+//!
+//! Eligibility, the formation window, the quintile, and the tie-break are the
+//! same for momentum and for low volatility. Only the per-name number and the
+//! end of the ranking that is held differ, so [`rebalance_at`] computes the
+//! window once and dispatches on [`crate::config::Strategy`]. Splitting it into
+//! a selection module of its own would be the tidier home for it, and it is
+//! deliberately not done in this round: moving it would rewrite the imports of
+//! the momentum regression tests, and those are the evidence that adding a
+//! second strategy left the first one alone.
 
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 
-use crate::config::BacktestConfig;
+use crate::config::{BacktestConfig, Strategy};
 use crate::error::EngineError;
+use crate::lowvol;
 use crate::panel::Panel;
 
 /// What one rebalance date decided.
@@ -41,10 +54,13 @@ pub struct Rebalance {
     pub date: Date,
     /// Indices into `Panel::securities`, ascending, which is identity order.
     pub eligible: Vec<usize>,
-    /// The top quintile by signal, best first.
+    /// The held quintile, best first, where "best" is whichever end of the
+    /// ranking the configured strategy takes.
     pub chosen: Vec<usize>,
     /// Signal per eligible name, in `eligible` order. Kept so a test can assert
-    /// on the ranking rather than only on what came out the other end.
+    /// on the ranking rather than only on what came out the other end. Under
+    /// [`Strategy::LowVolatility`] the value is the trailing volatility rather
+    /// than a return, and a smaller one is better.
     pub signals: Vec<(usize, Decimal)>,
 }
 
@@ -107,18 +123,35 @@ pub fn rebalance_at(
         if Decimal::from(series.bars_in(window_start, window_end)) < required_days {
             continue;
         }
-        let Some(value) = signal(panel, position, window_start, window_end) else {
+        let value = match config.strategy {
+            Strategy::Momentum => signal(panel, position, window_start, window_end),
+            Strategy::LowVolatility => {
+                lowvol::volatility(panel, position, window_start, window_end)
+            }
+        };
+        let Some(value) = value else {
             continue;
         };
         eligible.push(position);
         signals.push((position, value));
     }
 
-    // Best signal first. Ties break on the security's position, which is
+    // Best signal first, where momentum wants the largest and low volatility
+    // wants the smallest. Ties break on the security's position, which is
     // identity order, so a tie resolves the same way on every run rather than
-    // however the sort happened to land.
+    // however the sort happened to land. The tie-break is ascending in both
+    // arms deliberately: it is an identity order, not a second signal, and
+    // flipping it with the strategy would make the two strategies disagree
+    // about which of two identical names to prefer.
     let mut ranked = signals.clone();
-    ranked.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    match config.strategy {
+        Strategy::Momentum => {
+            ranked.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+        }
+        Strategy::LowVolatility => {
+            ranked.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
+        }
+    }
 
     // Integer division floors, so 9 eligible names give a quintile of 1 rather
     // than 2. The floor of 1 keeps a thin month holding something rather than

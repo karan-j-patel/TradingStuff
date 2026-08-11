@@ -5,7 +5,7 @@
 //! because that is where the append happens.
 
 use super::test_config;
-use crate::config::BacktestConfig;
+use crate::config::{BacktestConfig, Strategy};
 
 /// Every field of the configuration reaches the hash.
 ///
@@ -20,6 +20,13 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
     let base_hash = base.config_hash().expect("hashes");
 
     let variants = [
+        // Two strategies over the same universe, the same window, and the same
+        // costs are two hypotheses about what predicts returns, so they cannot
+        // share a hash.
+        BacktestConfig {
+            strategy: Strategy::LowVolatility,
+            ..base.clone()
+        },
         BacktestConfig {
             signal_lookback_months: 11,
             ..base.clone()
@@ -95,6 +102,49 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
              would record two different runs as the same configuration"
         );
     }
+}
+
+/// E9d. The strategy reaches the hash, so the two research programs cannot
+/// record as the same configuration.
+///
+/// `e7` above covers the field by mutation, which proves that *some* change to
+/// it moves the hash. This covers the pair that actually gets run: the two
+/// constructors, over an identical universe, whose only difference is the
+/// strategy. If `lowvol_v0` were a copy of `momentum_v0` the mutation test
+/// would still pass and this one would not.
+#[test]
+fn e9d_the_strategy_field_reaches_the_hash() {
+    let universe = "0".repeat(64);
+    let momentum = BacktestConfig::momentum_v0(&universe);
+    let lowvol = BacktestConfig::lowvol_v0(&universe);
+
+    assert_eq!(momentum.strategy, Strategy::Momentum);
+    assert_eq!(
+        lowvol.strategy,
+        Strategy::LowVolatility,
+        "lowvol_v0 does not select the low-volatility strategy"
+    );
+
+    // The canonical form carries a lowercase string rather than a nested
+    // object, which is what keeps the hashed bytes readable in a diff.
+    let canonical = lowvol.canonical_json().expect("serialises");
+    assert!(
+        canonical.contains(r#""strategy":"low_volatility""#),
+        "got {canonical}"
+    );
+    assert!(
+        momentum
+            .canonical_json()
+            .expect("serialises")
+            .contains(r#""strategy":"momentum""#)
+    );
+
+    assert_ne!(
+        momentum.config_hash().expect("hashes").as_str(),
+        lowvol.config_hash().expect("hashes").as_str(),
+        "the two research programs hash to the same configuration, so the trial \
+         log cannot tell a momentum run from a low-volatility one"
+    );
 }
 
 /// A `Decimal` written two ways is the same configuration and must hash the

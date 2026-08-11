@@ -47,9 +47,15 @@ pub enum Strategy<'a> {
     /// attempt with a null Sharpe, which is accurate: something was tried and
     /// no figure came back.
     Declared(&'a str),
-    /// The momentum engine over a curated price file and a universe file, and
+    /// The engine over a curated price file and a universe file, and
     /// optionally a curated actions file whose cash dividends reach the
     /// returns.
+    ///
+    /// Which strategy runs comes from `--program`, not from here, because the
+    /// research program is what scopes `N` and the two have to agree. The
+    /// variant keeps its momentum-era name so that the momentum regression
+    /// tests are untouched by this round; renaming it is deferred, not
+    /// forgotten.
     Momentum {
         prices: &'a Path,
         universe: &'a Path,
@@ -110,7 +116,7 @@ pub fn run(trials_path: &str, program: &str, strategy: &Strategy<'_>) -> anyhow:
 
     // Nothing between here and the append may use `?` on the engine. See the
     // module documentation.
-    let (config_hash, outcome) = evaluate(strategy);
+    let (config_hash, outcome) = evaluate(program, strategy);
 
     let sharpe = match &outcome {
         // Rounded once, here, and this exact value is both recorded and
@@ -143,25 +149,31 @@ pub fn run(trials_path: &str, program: &str, strategy: &Strategy<'_>) -> anyhow:
 }
 
 /// Run whatever was asked for, converting every failure into a value.
-fn evaluate(strategy: &Strategy<'_>) -> (ConfigHash, Outcome) {
+fn evaluate(program: &str, strategy: &Strategy<'_>) -> (ConfigHash, Outcome) {
     match strategy {
         Strategy::Declared(config) => (ConfigHash::of(config.as_bytes()), Outcome::Declared),
         Strategy::Momentum {
             prices,
             universe,
             actions,
-        } => momentum(prices, universe, *actions),
+        } => engine_run(program, prices, universe, *actions),
     }
 }
 
-fn momentum(prices: &Path, universe: &Path, actions: Option<&Path>) -> (ConfigHash, Outcome) {
+fn engine_run(
+    program: &str,
+    prices: &Path,
+    universe: &Path,
+    actions: Option<&Path>,
+) -> (ConfigHash, Outcome) {
     // Used only when the configuration itself cannot be resolved, which happens
-    // when the universe file cannot be read. The attempt still consumed a look
-    // at the data and is still recorded, so it still needs a hash.
+    // when the universe file cannot be read or the program names no
+    // configuration. The attempt still consumed a look at the data and is still
+    // recorded, so it still needs a hash.
     let unresolved = || {
         ConfigHash::of(
             format!(
-                "momentum-v0 unresolved prices={} universe={}",
+                "{program} unresolved prices={} universe={}",
                 prices.display(),
                 universe.display()
             )
@@ -169,7 +181,7 @@ fn momentum(prices: &Path, universe: &Path, actions: Option<&Path>) -> (ConfigHa
         )
     };
 
-    let (config, members) = match resolve(universe, actions) {
+    let (config, members) = match resolve(program, universe, actions) {
         Ok(resolved) => resolved,
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
@@ -193,7 +205,12 @@ fn momentum(prices: &Path, universe: &Path, actions: Option<&Path>) -> (ConfigHa
 /// over-counting, and over-counting is the safe direction: it makes the
 /// deflated Sharpe's denominator larger and every reported probability more
 /// conservative.
+/// The research program picks the configuration. An unrecognised one is
+/// refused rather than defaulted, because a run recorded under a program name
+/// that does not describe what ran is a mislabelled trial, and the config hash
+/// exists to make exactly that impossible.
 fn resolve(
+    program: &str,
     universe: &Path,
     actions: Option<&Path>,
 ) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>)> {
@@ -215,10 +232,19 @@ fn resolve(
         }
     };
 
+    let config = BacktestConfig::for_program(program, sha256).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--program {program} names no configuration this engine can run. The engine \
+             programs are {} and {}",
+            engine::PROGRAM,
+            engine::LOWVOL_PROGRAM
+        )
+    })?;
+
     Ok((
         BacktestConfig {
             actions_sha256,
-            ..BacktestConfig::momentum_v0(sha256)
+            ..config
         },
         members,
     ))

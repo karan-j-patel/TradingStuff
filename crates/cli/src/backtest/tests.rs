@@ -544,3 +544,148 @@ fn e8h_the_printed_caveats_follow_the_dividend_flag() {
         "the printer published the wrong bias statement beside a real figure"
     );
 }
+
+// --- E9, the program door ----------------------------------------------------
+
+/// `--program` picks the configuration, end to end, and the log records which
+/// one ran.
+///
+/// The gap this closes is narrow and expensive. If the door resolved
+/// `lowvol-v0` to the momentum constructor, every other test in this repository
+/// would still pass, the run would report a figure, and the trial log would
+/// carry a second momentum result filed under a low-volatility program. Nothing
+/// downstream could tell.
+#[test]
+fn the_program_selects_the_configuration_the_run_is_recorded_under() {
+    let path = temp_log("program-door");
+    let (prices, universe) = fixture_dataset("program-door");
+    let sha256 = rigor::hash_bytes(fs::read_to_string(&universe).expect("read").as_bytes());
+
+    for program in [engine::PROGRAM, engine::LOWVOL_PROGRAM] {
+        let code = run(
+            &path,
+            program,
+            &Strategy::Momentum {
+                prices: &prices,
+                universe: &universe,
+                actions: None,
+            },
+        )
+        .expect("the backtest runs");
+        assert_eq!(code, ExitCode::SUCCESS, "{program} produced no figure");
+    }
+
+    let log = TrialLog::load(&path).expect("reload");
+    let entries = log.trials();
+    assert_eq!(entries.len(), 2);
+    for (entry, expected) in entries.iter().zip([
+        BacktestConfig::momentum_v0(&sha256),
+        BacktestConfig::lowvol_v0(&sha256),
+    ]) {
+        assert_eq!(
+            entry.config_hash,
+            expected.config_hash().expect("hashes").as_str(),
+            "the trial recorded under {} is not the configuration that program \
+             names",
+            entry.program
+        );
+    }
+    assert_ne!(
+        entries[0].config_hash, entries[1].config_hash,
+        "the two programs recorded as the same configuration"
+    );
+}
+
+/// A program the engine has no configuration for is refused rather than run as
+/// momentum by default.
+///
+/// The trial is still recorded, with no Sharpe, because the attempt happened.
+/// What must not happen is a figure appearing under a name that does not
+/// describe what produced it.
+#[test]
+fn an_unknown_program_produces_no_figure() {
+    let path = temp_log("unknown-program");
+    let (prices, universe) = fixture_dataset("unknown-program");
+
+    let code = run(
+        &path,
+        "momentum-v99",
+        &Strategy::Momentum {
+            prices: &prices,
+            universe: &universe,
+            actions: None,
+        },
+    )
+    .expect("a refused configuration is still a completed command");
+    assert_eq!(
+        code,
+        ExitCode::FAILURE,
+        "an unrecognised program ran something and called it a success"
+    );
+
+    let log = TrialLog::load(&path).expect("reload");
+    assert_eq!(
+        log.entries().last().expect("an entry").sharpe,
+        None,
+        "an unrecognised program produced a figure, so it resolved to some \
+         configuration after all"
+    );
+    log.verify().expect("the chain verifies");
+}
+
+// --- E9e, the N caveat -------------------------------------------------------
+
+/// E9e. The `N` caveat is part of the DSR block, not a decoration on it.
+///
+/// Both states are checked, because the failure worth catching is a caveat that
+/// only appears beside a figure. A scoped `N` of one is exactly when the
+/// deflated Sharpe is honestly absent and exactly when a reader is most likely
+/// to reach for the raw number instead, so the line about what `N` counts
+/// matters more there, not less.
+#[test]
+fn e9e_the_n_caveat_prints_beside_every_dsr_block() {
+    let panel = Panel::from_bars(fixture_bars()).expect("panel builds");
+    let report = engine::backtest(&panel, &BacktestConfig::momentum_v0("0".repeat(64)))
+        .expect("the fixture backtests");
+
+    // One trial in the program. `sigma_SR` needs at least two recorded Sharpes
+    // to estimate their spread, so the scoped reading has no figure.
+    let thin = temp_log("n-caveat-thin");
+    let mut log = TrialLog::load(&thin).expect("load");
+    log.append(
+        engine::LOWVOL_PROGRAM,
+        &ConfigHash::of(b"only"),
+        Some(Decimal::from_str_exact("0.4").expect("literal")),
+    )
+    .expect("append");
+    let absent = report::dsr_block(&log, engine::LOWVOL_PROGRAM, &report);
+    assert!(
+        absent.contains("no figure exists"),
+        "the fixture does not reach the absent-figure branch, got {absent}"
+    );
+    assert!(
+        absent.contains(report::N_CAVEAT),
+        "the caveat is missing from a DSR block with no figure in it, got {absent}"
+    );
+
+    // Two recorded Sharpes in the program, so both readings produce a figure.
+    let full = temp_log("n-caveat-full");
+    let mut log = TrialLog::load(&full).expect("load");
+    for (config, sharpe) in [(&b"first"[..], "0.4"), (&b"second"[..], "0.9")] {
+        log.append(
+            engine::LOWVOL_PROGRAM,
+            &ConfigHash::of(config),
+            Some(Decimal::from_str_exact(sharpe).expect("literal")),
+        )
+        .expect("append");
+    }
+    let present = report::dsr_block(&log, engine::LOWVOL_PROGRAM, &report);
+    assert!(
+        !present.contains("no figure exists"),
+        "the fixture does not reach the figure branch, got {present}"
+    );
+    assert!(
+        present.contains(report::N_CAVEAT),
+        "the caveat is missing from a DSR block with a figure in it, got {present}"
+    );
+}
