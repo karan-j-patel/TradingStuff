@@ -25,6 +25,7 @@ mod hashing;
 mod lowvol;
 mod screens;
 mod turnover;
+mod value;
 mod weighting;
 mod wiring;
 

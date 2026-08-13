@@ -27,11 +27,15 @@ use ingest::actions::{
 };
 use ingest::adjusted::AdjustedBar;
 use ingest::marketcap::MarketCapRecord;
+use ingest::provider::{FundamentalRecord, ReportBasis};
 use ingest::schema::{AssetKey, PermanentId};
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 
 use crate::error::EngineError;
+
+/// The one field any strategy reads today. Whole US dollars, as shipped.
+pub const EQUITY_USD: &str = "equityusd";
 
 /// One cash dividend: the date it went ex, and the amount per share.
 ///
@@ -155,6 +159,18 @@ pub struct Series {
     /// the only consumer divides one of these by another, so any constant
     /// factor cancels. See [`Series::marketcap_at_month_end`].
     marketcaps: Vec<(Date, Decimal)>,
+    /// Filings, ascending by `(as_reported, period_end)`. Empty until
+    /// [`Panel::with_filings`] attaches any, on the same rule as the others.
+    ///
+    /// The sort is on BOTH dates, not on `as_reported` alone, and the second
+    /// term is load-bearing. Two filings can share a publication date: a
+    /// delinquent filer catching up lodges two quarters on one day, which the
+    /// Phase A probe saw in its 160-day delayed case. The upstream duplicate
+    /// rule keys on `(asset, basis, scope, period_end)` and so does not forbid
+    /// it. Sorting by period end within a filing date makes "the latest filing
+    /// visible" mean the latest fiscal period among those published, on every
+    /// run, rather than whichever row the sort happened to leave last.
+    filings: Vec<FundamentalRecord>,
 }
 
 impl Series {
@@ -387,6 +403,53 @@ impl Series {
             .then_some(marketcap)
     }
 
+    /// Shareholders' equity in whole US dollars from the latest filing visible
+    /// at `as_of` and no older than `staleness_days`.
+    ///
+    /// # Both bounds live here, deliberately
+    ///
+    /// The visibility rule has two halves and a caller that got one without the
+    /// other would be wrong in a way that still produces numbers. The lookahead
+    /// half (`as_reported <= as_of`) is the point-in-time guarantee. The
+    /// staleness half is what stops a name that quietly stopped filing from
+    /// being valued forever off its last report.
+    ///
+    /// They are one accessor rather than a filter plus a check at each call
+    /// site, so there is no way to reach a book value having applied one of
+    /// them. `x_f1` and `x_f2` pin the halves separately, because the delisting
+    /// round proved a one-sided window test defends a deleted term.
+    ///
+    /// # Which filing "latest" means
+    ///
+    /// The last element with `as_reported <= as_of` under the `(as_reported,
+    /// period_end)` sort this series is held in, so filings sharing a
+    /// publication date resolve to the latest fiscal period rather than to an
+    /// arbitrary one. See the `filings` field for why that case is real.
+    ///
+    /// `None` when nothing is visible yet, when the latest visible filing is
+    /// stale, or when that filing carries no `equityusd`. All three are
+    /// per-name ineligibility rather than errors: a company that has not filed
+    /// yet is an ordinary state of the world, and the formation census counts
+    /// it.
+    pub fn book_equity_usd_as_of(&self, as_of: Date, staleness_days: usize) -> Option<Decimal> {
+        let visible = self
+            .filings
+            .partition_point(|filing| filing.as_reported <= as_of);
+        let filing = self.filings[..visible].last()?;
+
+        // Civil dates carry no time, so the difference is whole days. The
+        // checked conversion is defence in depth: `run::schedule` refuses a
+        // bound i64 cannot hold before any formation runs, so `None` here is
+        // unreachable in a real run and exists so this accessor cannot wrap
+        // if called around that guard.
+        let age = as_of.duration_since(filing.as_reported).as_hours() / 24;
+        let bound = i64::try_from(staleness_days).ok()?;
+        if age > bound {
+            return None;
+        }
+        filing.fields.get(EQUITY_USD).copied()
+    }
+
     /// Every date this security has a bar on, for tests and diagnostics.
     pub fn dates(&self) -> impl Iterator<Item = Date> + '_ {
         self.bars.iter().map(|bar| bar.date)
@@ -426,6 +489,12 @@ pub struct Panel {
     marketcaps_sha256: Option<String>,
     /// Market cap records naming a security this panel does not hold.
     unmatched_marketcaps: usize,
+    /// SHA-256 of the filings file this panel's fundamentals were built from,
+    /// or `None` if none was attached. Same rule as
+    /// [`Panel::dividends_sha256`] and for the same reason.
+    filings_sha256: Option<String>,
+    /// Filing records naming a security this panel does not hold.
+    unmatched_filings: usize,
 }
 
 impl Panel {
@@ -459,6 +528,7 @@ impl Panel {
                 dividends: Vec::new(),
                 exits: Vec::new(),
                 marketcaps: Vec::new(),
+                filings: Vec::new(),
             })
             .collect();
 
@@ -484,6 +554,8 @@ impl Panel {
             delistings_sha256: None,
             unmatched_delistings: 0,
             marketcaps_sha256: None,
+            filings_sha256: None,
+            unmatched_filings: 0,
             unmatched_marketcaps: 0,
         })
     }
@@ -550,6 +622,8 @@ impl Panel {
             unmatched_delistings,
             marketcaps_sha256,
             unmatched_marketcaps,
+            filings_sha256,
+            unmatched_filings,
             ..
         } = self;
 
@@ -588,6 +662,8 @@ impl Panel {
             unmatched_delistings,
             marketcaps_sha256,
             unmatched_marketcaps,
+            filings_sha256,
+            unmatched_filings,
         })
     }
 
@@ -626,6 +702,8 @@ impl Panel {
             non_cash_actions,
             marketcaps_sha256,
             unmatched_marketcaps,
+            filings_sha256,
+            unmatched_filings,
             ..
         } = self;
 
@@ -661,6 +739,8 @@ impl Panel {
             unmatched_delistings,
             marketcaps_sha256,
             unmatched_marketcaps,
+            filings_sha256,
+            unmatched_filings,
         })
     }
 
@@ -712,6 +792,8 @@ impl Panel {
             non_cash_actions,
             delistings_sha256,
             unmatched_delistings,
+            filings_sha256,
+            unmatched_filings,
             ..
         } = self;
 
@@ -749,6 +831,8 @@ impl Panel {
             unmatched_delistings,
             marketcaps_sha256: Some(sha256.to_owned()),
             unmatched_marketcaps,
+            filings_sha256,
+            unmatched_filings,
         })
     }
 
@@ -799,6 +883,89 @@ impl Panel {
                 .collect(),
             ..self.clone()
         }
+    }
+
+    /// A new panel carrying the filings in `records`.
+    ///
+    /// Consumes and returns, exactly as the other three attachments do and for
+    /// the same reason.
+    ///
+    /// # Why a restated row is refused at the door
+    ///
+    /// The vendor's MR dimensions date a row by its PERIOD END while the values
+    /// are restated later, so an MR row is lookahead by construction: it hands a
+    /// backtest corrections that had not happened when the period ended. That is
+    /// the single worst failure this rail can have, and it is refused here
+    /// rather than filtered downstream, because a filter is a thing a later
+    /// caller can forget to apply and a refusal is not.
+    ///
+    /// The check is on the basis column of the data, not on what the fetch
+    /// intended to request. A fetch that asked for ARQ and was served MR rows
+    /// fails here too.
+    pub fn with_filings(
+        self,
+        records: &[FundamentalRecord],
+        sha256: &str,
+    ) -> Result<Panel, EngineError> {
+        let mut by_identity: BTreeMap<String, Vec<FundamentalRecord>> = BTreeMap::new();
+        for record in records {
+            if record.basis != ReportBasis::AsReported {
+                return Err(EngineError::RestatedFilingRefused {
+                    ticker: record.asset.ticker.clone(),
+                    period_end: record.period_end,
+                });
+            }
+            by_identity
+                .entry(identity(&record.asset))
+                .or_default()
+                .push(record.clone());
+        }
+
+        let Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_sha256,
+            unmatched_dividends,
+            non_cash_actions,
+            delistings_sha256,
+            unmatched_delistings,
+            marketcaps_sha256,
+            unmatched_marketcaps,
+            ..
+        } = self;
+
+        let mut unmatched_filings = 0usize;
+        let securities: Vec<Series> = securities
+            .into_iter()
+            .map(|series| {
+                let mut filings = by_identity.remove(&series.identity).unwrap_or_default();
+                // Both dates, for the reason the field documents: a shared
+                // publication date has to resolve to the latest fiscal period
+                // deterministically rather than however the sort landed.
+                filings.sort_by_key(|filing| (filing.as_reported, filing.period_end));
+                Series { filings, ..series }
+            })
+            .collect();
+
+        for leftover in by_identity.values() {
+            unmatched_filings += leftover.len();
+        }
+
+        Ok(Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_sha256,
+            unmatched_dividends,
+            non_cash_actions,
+            delistings_sha256,
+            unmatched_delistings,
+            marketcaps_sha256,
+            unmatched_marketcaps,
+            filings_sha256: Some(sha256.to_owned()),
+            unmatched_filings,
+        })
     }
 
     pub fn securities(&self) -> &[Series] {
@@ -853,6 +1020,21 @@ impl Panel {
     /// Market cap records naming a security outside this panel.
     pub fn unmatched_marketcaps(&self) -> usize {
         self.unmatched_marketcaps
+    }
+
+    /// Whether a filings file was attached, however little of it matched.
+    pub fn filings_attached(&self) -> bool {
+        self.filings_sha256.is_some()
+    }
+
+    /// The digest of the filings file the fundamentals came from.
+    pub fn filings_sha256(&self) -> Option<&str> {
+        self.filings_sha256.as_deref()
+    }
+
+    /// Filing records naming a security outside this panel.
+    pub fn unmatched_filings(&self) -> usize {
+        self.unmatched_filings
     }
 
     /// Last trading day of each calendar month present, ascending.

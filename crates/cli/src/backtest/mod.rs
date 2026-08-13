@@ -66,6 +66,8 @@ pub enum Strategy<'a> {
         /// Curated market caps, which the size screen ranks on and which carry
         /// the share-count leg of net payout yield.
         marketcap: Option<&'a Path>,
+        /// Curated filings, which carry the book equity the value signal reads.
+        filings: Option<&'a Path>,
     },
 }
 
@@ -74,6 +76,10 @@ impl<'a> Strategy<'a> {
     ///
     /// Clap already refuses the impossible combinations. This is the check that
     /// does not depend on the argument attributes staying correct.
+    /// Eight paths, and clap has already refused the impossible combinations.
+    /// Bundling them into a struct would move the argument list rather than
+    /// shorten it, since every one is a distinct optional file.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_args(
         config: Option<&'a str>,
         variant: Option<&'a str>,
@@ -82,6 +88,7 @@ impl<'a> Strategy<'a> {
         actions: Option<&'a PathBuf>,
         delistings: Option<&'a PathBuf>,
         marketcap: Option<&'a PathBuf>,
+        filings: Option<&'a PathBuf>,
     ) -> anyhow::Result<Self> {
         match (config, prices, universe) {
             // `--actions`, `--delistings` and `--variant` are refused here
@@ -102,10 +109,15 @@ impl<'a> Strategy<'a> {
                 if actions.is_none()
                     && delistings.is_none()
                     && marketcap.is_none()
+                    && filings.is_none()
                     && variant.is_none() =>
             {
                 Ok(Strategy::Declared(config))
             }
+            (Some(_), None, None) if filings.is_some() => anyhow::bail!(
+                "--filings carries the book equity a value run reads, and --config declares a \
+                 configuration with no engine behind it, so the two cannot go together"
+            ),
             (Some(_), None, None) if marketcap.is_some() => anyhow::bail!(
                 "--marketcap ranks the universe by size in an engine run, and --config \
                  declares a configuration with no engine behind it, so the two cannot go \
@@ -131,6 +143,7 @@ impl<'a> Strategy<'a> {
                 actions: actions.map(PathBuf::as_path),
                 delistings: delistings.map(PathBuf::as_path),
                 marketcap: marketcap.map(PathBuf::as_path),
+                filings: filings.map(PathBuf::as_path),
             }),
             _ => anyhow::bail!(
                 "give either --config, for a configuration with no engine behind it, or \
@@ -183,6 +196,7 @@ pub(crate) struct Attachments {
     pub(crate) actions: Option<Attachment>,
     pub(crate) delistings: Option<Attachment>,
     pub(crate) marketcap: Option<Attachment>,
+    pub(crate) filings: Option<Attachment>,
 }
 
 impl Attachments {
@@ -190,6 +204,7 @@ impl Attachments {
         actions: Option<&Path>,
         delistings: Option<&Path>,
         marketcap: Option<&Path>,
+        filings: Option<&Path>,
     ) -> anyhow::Result<Self> {
         Ok(Attachments {
             actions: actions
@@ -200,6 +215,9 @@ impl Attachments {
                 .transpose()?,
             marketcap: marketcap
                 .map(|path| Attachment::read(path, "market cap"))
+                .transpose()?,
+            filings: filings
+                .map(|path| Attachment::read(path, "filings"))
                 .transpose()?,
         })
     }
@@ -286,6 +304,7 @@ fn evaluate(
             actions,
             delistings,
             marketcap,
+            filings,
         } => engine_run(
             program,
             variant,
@@ -294,6 +313,7 @@ fn evaluate(
             *actions,
             *delistings,
             *marketcap,
+            *filings,
         ),
     }
 }
@@ -307,6 +327,7 @@ fn engine_run(
     actions: Option<&Path>,
     delistings: Option<&Path>,
     marketcap: Option<&Path>,
+    filings: Option<&Path>,
 ) -> (ConfigHash, Outcome) {
     // Used only when the configuration itself cannot be resolved, which happens
     // when the universe file cannot be read or the program names no
@@ -326,7 +347,7 @@ fn engine_run(
 
     // Read before anything is resolved, because the digests the configuration
     // records come out of these same buffers.
-    let attachments = match Attachments::read(actions, delistings, marketcap) {
+    let attachments = match Attachments::read(actions, delistings, marketcap, filings) {
         Ok(attachments) => attachments,
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
@@ -386,6 +407,7 @@ pub(crate) fn resolve(
     let actions_sha256 = Attachments::sha256(&attachments.actions);
     let delistings_sha256 = Attachments::sha256(&attachments.delistings);
     let marketcap_sha256 = Attachments::sha256(&attachments.marketcap);
+    let filings_sha256 = Attachments::sha256(&attachments.filings);
 
     let config = BacktestConfig::for_program(program, variant, sha256).ok_or_else(|| {
         // Listed from the registry rather than written out, so a pair added
@@ -413,6 +435,7 @@ pub(crate) fn resolve(
             delisting_convention: delistings.map(|_| engine::DELISTING_CONVENTION.to_string()),
             delistings_sha256,
             marketcap_sha256,
+            filings_sha256,
             ..config
         },
         members,
@@ -524,6 +547,28 @@ pub(crate) fn build_panel(
             println!(
                 "  {} named a security outside the universe file",
                 panel.unmatched_marketcaps()
+            );
+            panel
+        }
+    };
+
+    // The fourth attachment, on the same rule as the first three. A restated
+    // row is refused inside `with_filings` rather than filtered here.
+    let panel = match attachments.filings {
+        None => panel,
+        Some(attachment) => {
+            let records = ingest::parquet::read_filings_from_bytes(attachment.bytes)
+                .context("reading curated filings")?;
+            let read = records.len();
+            let panel = panel.with_filings(&records, &attachment.sha256)?;
+            println!("Read {read} filings, sha256 {}.", attachment.sha256);
+            println!(
+                "  book equity is read as of each formation, from the latest filing \
+                 published on or before it"
+            );
+            println!(
+                "  {} named a security outside the universe file",
+                panel.unmatched_filings()
             );
             panel
         }

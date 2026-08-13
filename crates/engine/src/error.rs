@@ -136,6 +136,13 @@ pub enum EngineError {
     RebalanceStrideZero,
 
     #[error(
+        "the book staleness bound of {days} days does not fit the signed day arithmetic that \
+         ages filings, so it would wrap rather than compare; a bound wider than the calendar \
+         is a configuration mistake rather than a tolerance"
+    )]
+    BookStalenessOutOfRange { days: usize },
+
+    #[error(
         "the liquidity floor fraction {fraction} is outside [0, 1), and a screen that \
          removes every eligible name or a negative number of them is a configuration \
          mistake rather than a screen"
@@ -183,6 +190,46 @@ pub enum EngineError {
          number this diagnostic could emit, so it is refused instead"
     )]
     TurnoverFitUnderdetermined { points: usize },
+
+    #[error(
+        "the filings file carries a restated row for {ticker}, period ending {period_end}. \
+         A restated figure is dated by its period end while its values were corrected later, so \
+         it hands a backtest information that did not exist on the day. It is refused at the \
+         attachment rather than filtered downstream, because a filter is a thing a later caller \
+         can forget"
+    )]
+    RestatedFilingRefused { ticker: String, period_end: Date },
+
+    #[error(
+        "the value strategy needs book_staleness_days and the configuration leaves it unset, so \
+         no bound says how old a filing may be. A default invented here would value names off \
+         reports of unknown age under a hash that records no bound at all"
+    )]
+    ValueStalenessMissing,
+
+    #[error(
+        "the configuration names a filings file ({config_has_filings}) while the panel carries \
+         attached filings ({panel_has_filings}), and those must agree. Otherwise the run either \
+         values names on a dataset the trial log does not record, or records one it never read"
+    )]
+    FilingsWiringMismatch {
+        config_has_filings: bool,
+        panel_has_filings: bool,
+    },
+
+    #[error(
+        "the value strategy needs cash dividends (attached: {dividends}), classified delistings \
+         (attached: {delistings}), market caps (attached: {marketcaps}) and filings (attached: \
+         {filings}), and at least one is missing here. A book-to-market run without book values \
+         has no signal, and one without the other three is a different strategy rather than a \
+         degraded one, so it is refused instead of run"
+    )]
+    ValueMissingInputs {
+        dividends: bool,
+        delistings: bool,
+        marketcaps: bool,
+        filings: bool,
+    },
 
     #[error("encoding the configuration for hashing failed")]
     ConfigEncode(#[source] serde_json::Error),

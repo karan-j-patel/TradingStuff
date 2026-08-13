@@ -80,6 +80,8 @@ mod tickers;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_fundamentals;
+#[cfg(test)]
 mod tests_native;
 
 pub use client::SharadarClient;

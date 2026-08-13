@@ -9,6 +9,7 @@
 
 use super::error::CurateError;
 use crate::actions::{Convention, DelistingReason, DividendKind, Listing};
+use crate::provider::{ReportBasis, ReportScope};
 use crate::schema::{CloseKind, SessionScope};
 
 pub(crate) fn session_str(value: SessionScope) -> &'static str {
@@ -135,5 +136,42 @@ fn unknown(dataset: &'static str, field: &'static str, value: &str) -> CurateErr
         dataset,
         field,
         value: value.to_owned(),
+    }
+}
+
+pub(crate) fn basis_str(value: ReportBasis) -> &'static str {
+    match value {
+        ReportBasis::AsReported => "as_reported",
+        ReportBasis::Restated => "restated",
+    }
+}
+
+/// Both labels are decodable, deliberately.
+///
+/// A reader that could not name `restated` would report a restated file as
+/// corrupt rather than as what it is, and the filings attachment refuses it by
+/// name. Refusing at the door with the right word beats failing to parse.
+pub(crate) fn basis_from(dataset: &'static str, value: &str) -> Result<ReportBasis, CurateError> {
+    match value {
+        "as_reported" => Ok(ReportBasis::AsReported),
+        "restated" => Ok(ReportBasis::Restated),
+        other => Err(unknown(dataset, "basis", other)),
+    }
+}
+
+pub(crate) fn scope_str(value: ReportScope) -> &'static str {
+    match value {
+        ReportScope::Quarterly => "quarterly",
+        ReportScope::Annual => "annual",
+        ReportScope::TrailingTwelveMonths => "trailing_twelve_months",
+    }
+}
+
+pub(crate) fn scope_from(dataset: &'static str, value: &str) -> Result<ReportScope, CurateError> {
+    match value {
+        "quarterly" => Ok(ReportScope::Quarterly),
+        "annual" => Ok(ReportScope::Annual),
+        "trailing_twelve_months" => Ok(ReportScope::TrailingTwelveMonths),
+        other => Err(unknown(dataset, "scope", other)),
     }
 }

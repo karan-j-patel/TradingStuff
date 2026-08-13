@@ -183,6 +183,16 @@ pub fn rebalance_at(
     let window_start = month_ends[index - config.signal_lookback_months];
     let window_end = month_ends[index - config.signal_skip_months];
 
+    // Read once, before the loop, and refused rather than defaulted. A default
+    // staleness would produce a number under a hash that says nothing about
+    // which bound produced it.
+    let staleness = match config.strategy {
+        Strategy::Value => config
+            .book_staleness_days
+            .ok_or(EngineError::ValueStalenessMissing)?,
+        _ => 0,
+    };
+
     let mut eligible = Vec::new();
     let mut signals = Vec::new();
     for position in tradable(panel, config, date, window_start, window_end)? {
@@ -191,6 +201,11 @@ pub fn rebalance_at(
             Strategy::LowVolatility => {
                 lowvol::volatility(panel, position, window_start, window_end)
             }
+            // The one signal that reads a date rather than a window. A name with
+            // no visible filing, a stale one, non-positive book equity, or no
+            // market cap at the formation returns `None` here and is dropped
+            // just below, which is what puts the exclusion BEFORE the ranking.
+            Strategy::Value => crate::value::book_to_market(panel, position, date, staleness),
             // Returned at the top of this function. The arm exists because the
             // compiler cannot see that, and it never runs.
             Strategy::ConservativeFormula => {
@@ -262,7 +277,10 @@ pub fn rebalance_at(
     // about which of two identical names to prefer.
     let mut ranked = signals.clone();
     match config.strategy {
-        Strategy::Momentum => {
+        // Both want the largest signal first: the strongest trend, and the
+        // cheapest book. Grouped rather than duplicated so the tie-break cannot
+        // drift between them.
+        Strategy::Momentum | Strategy::Value => {
             ranked.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
         }
         Strategy::LowVolatility => {

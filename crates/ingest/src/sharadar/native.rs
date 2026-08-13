@@ -76,6 +76,7 @@ use crate::actions::{ActionRecord, CorporateAction, DividendKind};
 use crate::adjusted::AdjustedBar;
 use crate::marketcap::MarketCapRecord;
 use crate::provider::{AdjustedPriceSource, DateRange, SourceError};
+use crate::provider::{FundamentalRecord, ReportBasis, ReportScope};
 use crate::schema::{AssetKey, CloseKind, PermanentId, SessionScope};
 use rust_decimal::Decimal;
 
@@ -94,6 +95,27 @@ const PRICE_FIELDS: &str = "ticker,date,open,high,low,close,volume,closeunadj,la
 /// behind are valuation ratios this platform computes itself from inputs it can
 /// see, and a ratio taken on trust is a number nobody can reproduce.
 const MARKETCAP_FIELDS: &str = "ticker,date,marketcap";
+
+/// The fundamentals columns this platform fetches, pinned to the probe.
+///
+/// Every name here exists in the 112-key set the Phase A probe enumerated, and
+/// nothing outside that set is requested. One walk serves the value rail and the
+/// later quality and profitability characteristics, so the columns those will
+/// need are collected now rather than spending a second quota window on them.
+///
+/// `calendardate` is fetched and deliberately not stored. Seeing it in a probe
+/// output is useful; keeping it on disk would put a third date next to two real
+/// ones, and the probe established it is the calendar year end regardless of
+/// fiscal end.
+const FUNDAMENTAL_FIELDS: &str = "ticker,date,reportperiod,calendardate,dimension,lastupdated,\
+equity,equityusd,netinc,netinccmnusd,revenue,revenueusd,assets,sharesbas,shareswa";
+
+/// The only dimension this platform requests.
+///
+/// As-reported quarterly. The MR dimensions date a row by its period end while
+/// restating the values later, which is lookahead by construction, so they are
+/// never requested and the panel refuses them if one arrives anyway.
+pub const ARQ: &str = "ARQ";
 
 /// The fields the actions fetch asks for.
 ///
@@ -243,42 +265,57 @@ impl SharadarClient {
     ) -> Result<Vec<T>, SourceError> {
         let mut collected = Vec::new();
         let mut skip = 0usize;
-        let mut boundary: Option<Map<String, Value>> = None;
+        // The tie group at the previous page's end: every trailing row of that
+        // page sharing its last row's sort token. Empty before the first
+        // request, and one row whenever the boundary token is unique, which is
+        // the overwhelmingly common case and is byte-identical to the
+        // single-row overlap this walk used before tie groups existed.
+        let mut boundary: Vec<Map<String, Value>> = Vec::new();
 
         for _ in 0..MAX_PAGES {
             let page = self.native_page(table, params, sort, skip, self.page_size())?;
             let returned = page.len();
-            let mut rows = page.iter();
 
-            if let Some(expected) = &boundary {
-                // The page was requested with a one-row overlap, so the first
-                // row back must be the row already held: the whole row, not
-                // merely something that sorts to the same place.
-                let Some(first) = rows.next() else {
+            if let Some(held) = boundary.last() {
+                // The page was requested with an overlap covering the whole tie
+                // group at the previous page's end, so that group must repeat,
+                // in order, as this page's head. Comparing only the first row
+                // pins the boundary row and says nothing about the order of the
+                // tie around it, which is how a reordered tie group loses a row.
+                if returned == 0 {
                     return Err(malformed(format!(
                         "the page of {table} after {sort}={:?} came back empty, \
                          so rows were removed underneath the walk",
-                        sort_token(table, sort, expected)?
+                        sort_token(table, sort, held)?
                     )));
-                };
-                if first != expected {
+                }
+                if returned < boundary.len() {
                     return Err(malformed(format!(
-                        "the {table} page boundary does not line up: expected the row at \
-                         {sort}={:?} to repeat as the first row of the next page, got a \
-                         different row at {sort}={:?}. Rows shifted underneath the walk, so \
-                         this result would silently duplicate or drop data",
-                        sort_token(table, sort, expected)?,
-                        sort_token(table, sort, first)?
+                        "the page of {table} after {sort}={:?} came back with {returned} \
+                         row(s) where the overlap of the tie group alone needs {}, so rows \
+                         were removed underneath the walk",
+                        sort_token(table, sort, held)?,
+                        boundary.len()
                     )));
+                }
+                for (expected, got) in boundary.iter().zip(&page) {
+                    if expected != got {
+                        return Err(malformed(format!(
+                            "the {table} page boundary does not line up: expected the row at \
+                             {sort}={:?} to repeat in the overlap of the next page, got a \
+                             different row at {sort}={:?}. Rows shifted underneath the walk, \
+                             so this result would silently duplicate or drop data",
+                            sort_token(table, sort, expected)?,
+                            sort_token(table, sort, got)?
+                        )));
+                    }
                 }
             }
 
-            let mut last_row = boundary.clone();
-            for row in rows {
+            for row in &page[boundary.len()..] {
                 // The sort field is still required on every row, so a response
                 // that cannot be ordered is refused rather than walked blind.
                 sort_token(table, sort, row)?;
-                last_row = Some(row.clone());
                 collected.push(decode(&NativeRow { fields: row })?);
             }
 
@@ -288,10 +325,25 @@ impl SharadarClient {
                 return Ok(collected);
             }
 
-            boundary = last_row;
-            // The absolute index of the last row just consumed, so the next
-            // request re-serves it as its first row.
-            skip += returned - 1;
+            let group = trailing_tie_group(table, sort, &page)?;
+            // A tie group filling a whole page cannot be walked past: the next
+            // request would have to overlap every row it just served, so `skip`
+            // would not advance and the walk would spin until MAX_PAGES.
+            // Refused by name rather than looping, because the alternative to a
+            // loud failure here is a silently truncated dataset.
+            if group.len() == returned {
+                return Err(malformed(format!(
+                    "every row of a full {table} page shares {sort}={:?}, so the tie group \
+                     fills the page and the walk cannot overlap it to make progress. A \
+                     larger page size is the fix; guessing which rows to skip would drop \
+                     data without saying so",
+                    sort_token(table, sort, &page[returned - 1])?
+                )));
+            }
+            // Back up over the whole tie group, so the next page re-serves it
+            // and the check above can compare it row by row.
+            skip += returned - group.len();
+            boundary = group;
         }
 
         Err(refused(format!(
@@ -334,6 +386,32 @@ impl SharadarClient {
 }
 
 /// The sort field of one row, required so an unorderable response is refused.
+/// The trailing run of rows sharing the page's last sort token.
+///
+/// One row whenever that token is unique, which is what keeps the ordinary walk
+/// exactly as it was. Longer only where the vendor's ordering is genuinely
+/// ambiguous, which is the case a one-row overlap cannot pin.
+fn trailing_tie_group(
+    table: &str,
+    sort: &str,
+    page: &[Map<String, Value>],
+) -> Result<Vec<Map<String, Value>>, SourceError> {
+    let Some(last) = page.last() else {
+        return Ok(Vec::new());
+    };
+    let token = sort_token(table, sort, last)?.to_owned();
+
+    let mut group = Vec::new();
+    for row in page.iter().rev() {
+        if sort_token(table, sort, row)? != token {
+            break;
+        }
+        group.push(row.clone());
+    }
+    group.reverse();
+    Ok(group)
+}
+
 fn sort_token<'a>(
     table: &str,
     sort: &str,
@@ -649,6 +727,44 @@ impl SharadarClient {
         Ok(self.redact(&self.get_native(table, params)?))
     }
 
+    /// As-reported quarterly fundamentals for one security.
+    ///
+    /// # Why there is no `require_rows` here
+    ///
+    /// A name with no rows is an ordinary fact rather than a fault: plenty of
+    /// securities in a price universe never filed with the SEC at all, and the
+    /// probe found real holes in AR coverage besides. Treating an empty answer
+    /// as a failure would turn every such name into a decline. The walk counts
+    /// them separately instead.
+    ///
+    /// That leaves the wrong-case table trap uncovered at runtime, exactly as it
+    /// is for the daily and actions fetches, and it is covered by a test pinning
+    /// the constant against the literal spelling.
+    ///
+    /// The asset key is the caller's rather than one rebuilt from the ticker
+    /// string. This table ships no permanent identifier at all and silently
+    /// ignores a `permaticker` filter, so the identity has to come from the
+    /// universe entry the fetch was made under. That is also why the walk
+    /// applies a life-window filter afterwards: a recycled ticker returns
+    /// another company's filings and nothing in the row says so.
+    pub fn fetch_fundamentals_arq(
+        &self,
+        asset: &AssetKey,
+    ) -> Result<Vec<FundamentalRecord>, SourceError> {
+        check_query_safe("ticker", &asset.ticker)?;
+        let params = fundamentals_params(&asset.ticker);
+        let rows = self.fetch_native(
+            native_tables::FUNDAMENTALS,
+            &params,
+            native::FILING_DATE,
+            decode_fundamental,
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.into_record(asset.clone()))
+            .collect())
+    }
+
     /// Filing dates from the fundamentals table.
     ///
     /// Exists to exercise the one column whose name genuinely differs between
@@ -780,6 +896,104 @@ fn decode_marketcap(row: &NativeRow<'_>) -> Result<DailyRow, SourceError> {
     Ok(DailyRow {
         date: row.date("date")?,
         marketcap: row.decimal("marketcap")?,
+    })
+}
+
+/// The query one fundamentals request sends.
+///
+/// A free function rather than three lines inline, so a test can read the
+/// outgoing parameters without a transport. What it pins is the `dimension`
+/// filter: the restated dimensions date a row by its period end while the
+/// values were corrected later, and a request that stopped naming ARQ would ask
+/// for all six and be answered with the lot.
+pub(crate) fn fundamentals_params(ticker: &str) -> [(&'static str, String); 3] {
+    [
+        ("ticker", ticker.to_string()),
+        ("dimension", ARQ.to_string()),
+        ("fields", FUNDAMENTAL_FIELDS.to_string()),
+    ]
+}
+
+/// One fundamentals row as the vendor sent it, before an identity is attached.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FundamentalRow {
+    pub(crate) as_reported: Date,
+    pub(crate) period_end: Date,
+    pub(crate) dimension: String,
+    pub(crate) fields: std::collections::BTreeMap<String, rust_decimal::Decimal>,
+}
+
+impl FundamentalRow {
+    /// Attach the caller's identity, which the vendor row does not carry.
+    pub(crate) fn into_record(self, asset: AssetKey) -> FundamentalRecord {
+        // ARQ is the only dimension requested and the only one this maps. A row
+        // carrying anything else is refused at decode, so the pair below is not
+        // a default standing in for an unknown.
+        FundamentalRecord {
+            asset,
+            as_reported: self.as_reported,
+            period_end: self.period_end,
+            // This table is one snapshot per fetch and ships no observation
+            // stamp of its own. `lastupdated` is a table-refresh time and says
+            // nothing about when these values were pulled, so the filing date
+            // stands here and the curated file's provenance carries the rest.
+            observed_at: self.as_reported,
+            source: super::PROVIDER.to_string(),
+            basis: ReportBasis::AsReported,
+            scope: ReportScope::Quarterly,
+            // This vendor ships no accession number. The column exists so a
+            // provider that does fits without a schema break.
+            filing_id: None,
+            fields: self.fields,
+        }
+    }
+}
+
+/// The numeric columns kept from a fundamentals row.
+///
+/// A column the vendor sends as JSON null contributes no entry, so absence in
+/// the map means the vendor had no figure rather than a figure of zero.
+pub(crate) const FUNDAMENTAL_VALUES: &[&str] = &[
+    "equity",
+    "equityusd",
+    "netinc",
+    "netinccmnusd",
+    "revenue",
+    "revenueusd",
+    "assets",
+    "sharesbas",
+    "shareswa",
+];
+
+pub(crate) fn decode_fundamental(row: &NativeRow<'_>) -> Result<FundamentalRow, SourceError> {
+    // Read and discarded, so a response that dropped the column is an error
+    // rather than a silent success.
+    row.text("ticker")?;
+
+    let dimension = row.text("dimension")?.to_string();
+    // Refused rather than mapped. A response carrying MR rows to an ARQ request
+    // is the vendor disagreeing with the filter, and restated values dated by
+    // period end are the exact lookahead this rail exists to keep out.
+    if dimension != ARQ {
+        return Err(malformed(format!(
+            "the fundamentals row came back under dimension {dimension:?} for an {ARQ} \
+             request. A restated dimension dates a row by its period end while its values \
+             were corrected later, so it is refused rather than relabelled"
+        )));
+    }
+
+    let mut fields = std::collections::BTreeMap::new();
+    for name in FUNDAMENTAL_VALUES {
+        if let Some(value) = row.optional_decimal(name)? {
+            fields.insert((*name).to_string(), value);
+        }
+    }
+
+    Ok(FundamentalRow {
+        as_reported: row.date(native::FILING_DATE)?,
+        period_end: row.date("reportperiod")?,
+        dimension,
+        fields,
     })
 }
 

@@ -373,3 +373,58 @@ fn t6_an_empty_input_file_is_refused() {
     assert!(format!("{error:#}").contains("no rows"), "got {error:#}");
     assert!(!prices_path(&dir).exists());
 }
+
+use super::{LIFE_WINDOW_DAYS, within_life};
+use jiff::civil::date;
+
+/// X-F8. A filing whose fiscal period sits outside a name's price life is
+/// dropped, and one inside it is kept.
+///
+/// # What this mitigates and what it cannot
+///
+/// Fundamentals rows carry no permanent identifier and the vendor silently
+/// ignores a `permaticker` filter, so the join is by ticker string alone and
+/// a recycled ticker returns a previous tenant's filings under our name.
+/// The life window rejects those, because a company that held the ticker
+/// before ours started trading filed for periods far outside our price
+/// history.
+///
+/// It cannot detect a recycle WITHIN a name's price life. That residual is
+/// recorded rather than solved, here and on the constant.
+///
+/// Both edges are asserted, and the far edge is the one that matters: a
+/// mitigation that only ever kept rows would pass every "this is kept"
+/// assertion while dropping nothing at all.
+#[test]
+fn x_f8_a_filing_outside_a_names_price_life_is_dropped() {
+    let first = date(2010, 1, 4);
+    let last = Some(date(2020, 12, 31));
+
+    // Inside, comfortably.
+    assert!(within_life(date(2015, 6, 30), first, last));
+    // Inside, on both edges. 400 days before the first price and after the
+    // last, which is the slack the constant allows.
+    assert!(within_life(date(2009, 1, 4), first, last), "the lower edge");
+    assert!(
+        within_life(date(2021, 12, 31), first, last),
+        "the upper edge"
+    );
+
+    // Outside. A previous tenant of the ticker, and a later one.
+    assert!(
+        !within_life(date(2005, 6, 30), first, last),
+        "a filing five years before the name started trading was kept, so a \
+             recycled ticker's earlier history reaches the panel"
+    );
+    assert!(
+        !within_life(date(2025, 6, 30), first, last),
+        "a filing years after the name stopped trading was kept"
+    );
+
+    // A name still trading has no last price date, so only the lower edge
+    // applies and nothing recent is dropped for being in the future.
+    assert!(within_life(date(2030, 1, 1), first, None));
+    assert!(!within_life(date(2005, 6, 30), first, None));
+
+    assert_eq!(LIFE_WINDOW_DAYS, 400);
+}

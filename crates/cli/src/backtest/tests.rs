@@ -230,6 +230,7 @@ fn e7_a_run_appends_one_entry_carrying_the_engine_sharpe() {
             actions: None,
             delistings: None,
             marketcap: None,
+            filings: None,
         },
     )
     .expect("the momentum backtest runs");
@@ -278,6 +279,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
             actions: None,
             delistings: None,
             marketcap: None,
+            filings: None,
         },
     )
     .expect("first run");
@@ -305,6 +307,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
             actions: None,
             delistings: None,
             marketcap: None,
+            filings: None,
         },
     )
     .expect("second run");
@@ -356,6 +359,7 @@ fn an_engine_failure_still_records_a_trial() {
             actions: None,
             delistings: None,
             marketcap: None,
+            filings: None,
         },
     )
     .expect("a failed engine is still a completed command");
@@ -397,6 +401,7 @@ fn an_unresolvable_configuration_still_records_a_trial() {
             actions: None,
             delistings: None,
             marketcap: None,
+            filings: None,
         },
     )
     .expect("a failed engine is still a completed command");
@@ -417,11 +422,20 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
     let marketcap = PathBuf::from("marketcap.parquet");
 
     assert!(matches!(
-        Strategy::from_args(Some("free text"), None, None, None, None, None, None),
+        Strategy::from_args(Some("free text"), None, None, None, None, None, None, None),
         Ok(Strategy::Declared(_))
     ));
     assert!(matches!(
-        Strategy::from_args(None, None, Some(&prices), Some(&universe), None, None, None),
+        Strategy::from_args(
+            None,
+            None,
+            Some(&prices),
+            Some(&universe),
+            None,
+            None,
+            None,
+            None
+        ),
         Ok(Strategy::Momentum {
             actions: None,
             delistings: None,
@@ -436,6 +450,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             Some(&prices),
             Some(&universe),
             Some(&actions),
+            None,
             None,
             None
         ),
@@ -454,6 +469,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             Some(&universe),
             None,
             Some(&delistings),
+            None,
             None
         ),
         Ok(Strategy::Momentum {
@@ -471,7 +487,8 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             Some(&universe),
             None,
             None,
-            Some(&marketcap)
+            Some(&marketcap),
+            None
         ),
         Ok(Strategy::Momentum {
             actions: None,
@@ -481,13 +498,14 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
         })
     ));
     for bad in [
-        Strategy::from_args(None, None, None, None, None, None, None),
-        Strategy::from_args(None, None, Some(&prices), None, None, None, None),
+        Strategy::from_args(None, None, None, None, None, None, None, None),
+        Strategy::from_args(None, None, Some(&prices), None, None, None, None, None),
         Strategy::from_args(
             Some("free text"),
             None,
             Some(&prices),
             Some(&universe),
+            None,
             None,
             None,
             None,
@@ -502,6 +520,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             Some(&actions),
             None,
             None,
+            None,
         ),
         // Delistings with no engine behind them, the same failure one dataset
         // over. The recorded hash would name the imputation convention while
@@ -513,6 +532,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             None,
             None,
             Some(&delistings),
+            None,
             None,
         ),
         // Market caps with no engine behind them, the same failure one dataset
@@ -526,6 +546,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             None,
             None,
             Some(&marketcap),
+            None,
         ),
         // A variant with no engine behind it, which clap does not refuse on its
         // own. Measured 2026-08-11: `--config` conflicts with `--prices`, and
@@ -535,6 +556,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
         Strategy::from_args(
             Some("free text"),
             Some("price-floor-10"),
+            None,
             None,
             None,
             None,
@@ -704,6 +726,7 @@ fn e11j_the_recorded_hash_moves_when_delistings_are_supplied() {
                 actions: None,
                 delistings: supplied.map(PathBuf::as_path),
                 marketcap: None,
+                filings: None,
             },
         )
         .expect("the momentum backtest runs");
@@ -764,6 +787,7 @@ fn e11k_the_recorded_hash_follows_the_delistings_file() {
                 actions: None,
                 delistings: Some(delistings.as_path()),
                 marketcap: None,
+                filings: None,
             },
         )
         .expect("the momentum backtest runs")
@@ -890,6 +914,7 @@ fn e11l_the_recorded_hash_is_over_the_delistings_bytes_not_its_records() {
                 actions: None,
                 delistings: Some(file.as_path()),
                 marketcap: None,
+                filings: None,
             },
         )
         .expect("the momentum backtest runs");
@@ -937,6 +962,7 @@ fn e8g_the_recorded_hash_moves_when_actions_are_supplied() {
                 actions: supplied.map(PathBuf::as_path),
                 delistings: None,
                 marketcap: None,
+                filings: None,
             },
         )
         .expect("the momentum backtest runs");
@@ -1033,6 +1059,7 @@ fn the_program_selects_the_configuration_the_run_is_recorded_under() {
                 actions: None,
                 delistings: None,
                 marketcap: None,
+                filings: None,
             },
         )
         .expect("the backtest runs");
@@ -1081,6 +1108,7 @@ fn an_unknown_program_produces_no_figure() {
             actions: None,
             delistings: None,
             marketcap: None,
+            filings: None,
         },
     )
     .expect("a refused configuration is still a completed command");
@@ -1131,6 +1159,7 @@ fn e10c_a_variant_reaches_the_log_as_the_bare_program() {
                 actions: None,
                 delistings: None,
                 marketcap: None,
+                filings: None,
             },
         )
         .expect("the backtest runs");
@@ -1189,7 +1218,7 @@ fn e10c_a_variant_reaches_the_log_as_the_bare_program() {
 /// larger market cap, so a size screen that drops the small half drops `BBB`.
 /// The market caps are a fixed multiple of the close for both, which leaves the
 /// share ratio at exactly one and the payout leg reading dividends alone.
-fn registry_dataset(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+fn registry_dataset(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
     let dir = std::env::temp_dir().join(format!("backtest-cli-{name}"));
     fs::create_dir_all(&dir).expect("creating the fixture directory");
 
@@ -1268,12 +1297,57 @@ fn registry_dataset(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf)
     ingest::parquet::write_marketcap(caps, &marketcap, "Synthetic")
         .expect("writing the fixture market caps");
 
+    // Filings, so the value program in the registry has a book value to rank
+    // on. Every six month-ends, which keeps every formation inside the 548-day
+    // staleness bound with room to spare.
+    //
+    // The equity figures alternate so the ranking flips between the two names.
+    // AAA's market equity is `close * 100` million and BBB's is a flat 50
+    // million, so AAA wins on book-to-market only when its book exceeds 200
+    // times BBB's. Alternating the winner is what gives the value series
+    // turnover and its returns dispersion; a fixture where one name always won
+    // would hold a flat price forever and the run would have no Sharpe to
+    // record, which is the shape `e10d` asserts against.
+    let mut filings = Vec::new();
+    for (round, step) in (0..days.len()).step_by(6).enumerate() {
+        let aaa_book = if round % 2 == 0 {
+            "30000000000"
+        } else {
+            "10000000000"
+        };
+        for (ticker, permaticker, equity) in [("AAA", 1u64, aaa_book), ("BBB", 2, "100000000")] {
+            filings.push(ingest::FundamentalRecord {
+                asset: AssetKey {
+                    ticker: ticker.to_string(),
+                    permanent: Some(PermanentId::Sharadar(permaticker)),
+                },
+                as_reported: days[step],
+                period_end: days[step.saturating_sub(2)],
+                observed_at: days[step],
+                source: "Synthetic".to_string(),
+                basis: ingest::ReportBasis::AsReported,
+                scope: ingest::ReportScope::Quarterly,
+                filing_id: None,
+                fields: [(
+                    "equityusd".to_string(),
+                    Decimal::from_str_exact(equity).expect("literal"),
+                )]
+                .into_iter()
+                .collect(),
+            });
+        }
+    }
+    let filings_path = dir.join("filings.parquet");
+    ingest::parquet::write_filings(filings, &filings_path, "Synthetic")
+        .expect("writing the fixture filings");
+
     (
         prices,
         universe,
         fixture_actions(name),
         fixture_delistings(name),
         marketcap,
+        filings_path,
     )
 }
 
@@ -1288,7 +1362,8 @@ fn registry_dataset(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf)
 #[test]
 fn e10d_every_runnable_pair_hashes_distinctly() {
     let path = temp_log("registry-walk");
-    let (prices, universe, actions, delistings, marketcap) = registry_dataset("registry-walk");
+    let (prices, universe, actions, delistings, marketcap, filings) =
+        registry_dataset("registry-walk");
 
     for (program, variant) in engine::RUNNABLE {
         let code = run(
@@ -1301,6 +1376,7 @@ fn e10d_every_runnable_pair_hashes_distinctly() {
                 actions: Some(actions.as_path()),
                 delistings: Some(delistings.as_path()),
                 marketcap: Some(marketcap.as_path()),
+                filings: Some(filings.as_path()),
             },
         )
         .expect("the backtest runs");
@@ -1379,6 +1455,7 @@ fn e10e_an_unknown_variant_produces_no_figure() {
                 actions: None,
                 delistings: None,
                 marketcap: None,
+                filings: None,
             },
         )
         .expect("a refused configuration is still a completed command");
@@ -1483,7 +1560,8 @@ fn e9e_the_n_caveat_prints_beside_every_dsr_block() {
 /// are not what the finding was about.
 #[test]
 fn x_w2_the_attachment_paths_are_never_read_twice() {
-    let (prices, universe, actions, delistings, marketcap) = registry_dataset("single-read");
+    let (prices, universe, actions, delistings, marketcap, filings) =
+        registry_dataset("single-read");
 
     let text = fs::read_to_string(&universe).expect("read universe");
     let members: std::collections::HashSet<ingest::schema::AssetKey> =
@@ -1498,10 +1576,11 @@ fn x_w2_the_attachment_paths_are_never_read_twice() {
         Some(actions.as_path()),
         Some(delistings.as_path()),
         Some(marketcap.as_path()),
+        Some(filings.as_path()),
     )
     .expect("the attachments read");
 
-    for path in [&actions, &delistings, &marketcap] {
+    for path in [&actions, &delistings, &marketcap, &filings] {
         fs::remove_file(path).expect("removing a fixture attachment");
         assert!(
             !path.exists(),
@@ -1532,6 +1611,14 @@ fn x_w2_the_attachment_paths_are_never_read_twice() {
                 .marketcap
                 .as_ref()
                 .expect("marketcap")
+                .sha256
+                .clone(),
+        ),
+        filings_sha256: Some(
+            attachments
+                .filings
+                .as_ref()
+                .expect("filings")
                 .sha256
                 .clone(),
         ),

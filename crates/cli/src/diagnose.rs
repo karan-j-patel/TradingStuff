@@ -100,7 +100,10 @@ pub(crate) fn turnover_report(
     let log =
         TrialLog::load(trials).with_context(|| format!("loading the trial log from {trials}"))?;
 
-    let attachments = Attachments::read(actions, delistings, marketcap)?;
+    // No filings. The turnover diagnostic replays formations of whatever
+    // program it is pointed at, and a value program pointed here would refuse
+    // for want of them, which is the correct answer rather than a gap.
+    let attachments = Attachments::read(actions, delistings, marketcap, None)?;
     let (config, members) = resolve(program, variant, universe, delistings, &attachments)?;
     let panel = build_panel(prices, attachments, &members)?;
 

@@ -112,6 +112,24 @@ pub enum Dataset {
         data_root: Option<String>,
     },
 
+    /// Curate as-reported quarterly filings, straight from the provider
+    ///
+    /// One request per security, ARQ only. The restated dimensions are never
+    /// requested: they date a row by its period end while the values were
+    /// corrected later, which is lookahead by construction.
+    Filings {
+        /// Fetch from the configured provider. Filings have no file input:
+        /// the identity a row is stored under comes from the universe entry
+        /// the request was made for, because this table ships none of its own
+        #[arg(long)]
+        fetch: bool,
+        /// Universe file to fetch, as written by `ingest fetch-universe`
+        #[arg(long)]
+        universe: Option<String>,
+        #[arg(long, help = DATA_ROOT_HELP)]
+        data_root: Option<String>,
+    },
+
     /// Curate corporate actions, from a JSONL file or straight from the provider
     Actions {
         /// JSONL file to read, one ActionRecord per line
@@ -248,6 +266,27 @@ pub fn run(dataset: &Dataset) -> anyhow::Result<ExitCode> {
             // "an operator handed us a file" is itself the provenance.
             curate_actions(read_jsonl(input)?, &path, "operator-jsonl")
         }
+        Dataset::Filings {
+            fetch,
+            universe,
+            data_root,
+        } => {
+            let root = ingest::parquet::data_root(data_root.as_deref());
+            let path = ingest::parquet::filings_path(&root);
+
+            let Some(universe) = universe else {
+                anyhow::bail!(
+                    "filings needs --universe. This table ships no permanent identifier and \
+                     silently ignores a permaticker filter, so the identity a row is stored \
+                     under can only come from the universe entry it was fetched for"
+                );
+            };
+            if !*fetch {
+                anyhow::bail!("--universe describes what to fetch, so it needs --fetch");
+            }
+            fetch_filings_from_universe(universe, &path)
+        }
+
         Dataset::Marketcap {
             fetch,
             universe,
@@ -355,6 +394,140 @@ fn fetch_marketcap_from_universe(
     println!();
 
     curate_marketcap(records, path, source.name())
+}
+
+/// How many days either side of a name's price life a filing may sit.
+///
+/// # The vendor limitation this exists for
+///
+/// Fundamentals rows carry no permanent identifier and the vendor silently
+/// ignores a `permaticker` filter, so the join back to our universe is by ticker
+/// string alone. A recycled ticker therefore returns another company's filings
+/// under our name, and nothing in the row says so.
+///
+/// The mitigation is a life window: a filing whose fiscal period lies far
+/// outside the stretch our own price data covers for that name almost certainly
+/// belongs to whoever held the ticker before or after. Four hundred days is
+/// a little over a year, which admits the ordinary case of a filing published
+/// shortly before a name starts trading or shortly after it stops, and rejects
+/// a prior tenant's history.
+///
+/// **Residual risk, recorded rather than solved.** A recycle WITHIN a name's
+/// price life is undetectable from this table. Nothing here claims otherwise,
+/// and the census the walk prints is what makes the size of the filter visible.
+const LIFE_WINDOW_DAYS: i64 = 400;
+
+/// Whether a filing's fiscal period sits inside a name's price life.
+fn within_life(period_end: Date, first_price: Date, last_price: Option<Date>) -> bool {
+    let slack = jiff::SignedDuration::from_hours(LIFE_WINDOW_DAYS * 24);
+    let Some(earliest) = first_price.checked_sub(slack).ok() else {
+        return false;
+    };
+    // A name still trading has no last price date. Its life has no upper edge
+    // yet, so only the lower one applies.
+    let latest = match last_price {
+        None => return period_end >= earliest,
+        Some(last) => match last.checked_add(slack) {
+            Ok(latest) => latest,
+            Err(_) => return false,
+        },
+    };
+    period_end >= earliest && period_end <= latest
+}
+
+/// Fetch as-reported quarterly filings for every security in a universe file.
+///
+/// Mirrors [`fetch_marketcap_from_universe`] down to the conduct: serial, one
+/// security at a time, a decline recorded against the name and the walk
+/// continued, a rejected credential fatal, and an empty answer counted as
+/// coverage rather than as a fault. Plenty of securities in a price universe
+/// never filed with the SEC, and the Phase A probe found real holes in the
+/// as-reported table besides.
+fn fetch_filings_from_universe(universe_path: &str, path: &Path) -> anyhow::Result<ExitCode> {
+    let text = std::fs::read_to_string(universe_path)
+        .with_context(|| format!("reading {universe_path}"))?;
+    let entries = universe::from_jsonl(&text)?;
+    if entries.is_empty() {
+        anyhow::bail!("{universe_path} holds no securities, so there is nothing to fetch");
+    }
+
+    let source = SharadarClient::native_from_env()?;
+    let total = entries.len();
+    println!("Fetching as-reported quarterly filings for {total} securities");
+    println!("  dimension ARQ only; the restated dimensions are never requested");
+    println!("  serial, one security at a time, and a decline is recorded rather than fatal");
+    println!("  rows whose fiscal period sits more than {LIFE_WINDOW_DAYS} days outside a name's");
+    println!("  price life are dropped, which is the ticker-recycling mitigation");
+    println!();
+
+    let mut records: Vec<ingest::FundamentalRecord> = Vec::new();
+    let mut declined = 0usize;
+    let mut no_coverage = 0usize;
+    let mut out_of_life = 0usize;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let position = index + 1;
+        let ticker = &entry.asset.ticker;
+
+        match source.fetch_fundamentals_arq(&entry.asset) {
+            Ok(fetched) if fetched.is_empty() => {
+                no_coverage += 1;
+            }
+            Ok(fetched) => {
+                let served = fetched.len();
+                let kept: Vec<_> = fetched
+                    .into_iter()
+                    .filter(|record| {
+                        within_life(
+                            record.period_end,
+                            entry.first_price_date,
+                            entry.last_price_date,
+                        )
+                    })
+                    .collect();
+                let dropped = served - kept.len();
+                out_of_life += dropped;
+                if dropped > 0 {
+                    println!(
+                        "  [{position}/{total}] {ticker}: {} filings, {dropped} outside its \
+                         price life and dropped",
+                        kept.len()
+                    );
+                } else {
+                    println!("  [{position}/{total}] {ticker}: {} filings", kept.len());
+                }
+                records.extend(kept);
+            }
+            Err(SourceError::Unauthorized { provider }) => {
+                anyhow::bail!(
+                    "{provider} rejected the credentials at security {position} of {total}, so \
+                     every remaining fetch would fail the same way. Nothing was written."
+                );
+            }
+            Err(error) => {
+                declined += 1;
+                println!("  [{position}/{total}] {ticker}: DECLINED, {error}");
+            }
+        }
+    }
+
+    println!();
+    println!("Fetch outcomes");
+    println!(
+        "  securities with filings:              {}",
+        total - no_coverage - declined
+    );
+    println!("  securities the table has no rows for:  {no_coverage}");
+    println!("  declined:                              {declined}");
+    println!("  rows dropped as outside a price life:  {out_of_life}");
+    println!();
+
+    let written = ingest::parquet::write_filings(records, path, source.name())
+        .with_context(|| format!("writing {}", path.display()))?;
+    println!("Curated {written} filings.");
+    println!("  written:  {}", path.display());
+    println!("  source:   {}", source.name());
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Validate and write the market cap dataset.

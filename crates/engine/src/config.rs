@@ -44,6 +44,14 @@ pub const LOWVOL_PROGRAM: &str = "lowvol-v0";
 /// from either leg on its own, so it carries its own scoped `N`.
 pub const CONSERVATIVE_PROGRAM: &str = "conservative-v0";
 
+/// The research program identifier the value configuration belongs to.
+///
+/// A fourth program on the rule the other three follow. Book-to-market is a
+/// different hypothesis about what predicts returns from momentum, from low
+/// volatility, and from the conservative composite, so it carries its own
+/// scoped `N`.
+pub const VALUE_PROGRAM: &str = "value-v0";
+
 /// The variant of [`LOWVOL_PROGRAM`] that raises the price floor to $10.
 pub const VARIANT_PRICE_FLOOR_10: &str = "price-floor-10";
 
@@ -94,6 +102,7 @@ pub const RUNNABLE: &[(&str, Option<&str>)] = &[
     (LOWVOL_PROGRAM, Some(VARIANT_LIQUIDITY_SCREENED)),
     (LOWVOL_PROGRAM, Some(VARIANT_VALUE_WEIGHTED)),
     (CONSERVATIVE_PROGRAM, None),
+    (VALUE_PROGRAM, None),
 ];
 
 /// How much of the portfolio each held name gets.
@@ -158,6 +167,15 @@ pub enum Strategy {
     /// rather than of a name. So the conservative arm owns its selection path
     /// instead of the two being forced into one shape prematurely.
     ConservativeFormula,
+    /// Hold the highest quintile by book-to-market: accounting equity over
+    /// market equity, both as of the formation date.
+    ///
+    /// A scalar signal like the first two, so it takes the shared sort-then-slice
+    /// path rather than owning its selection the way the composite does. What is
+    /// new is where the number comes from: a filing, which is visible only after
+    /// it was published and only for as long as it is not stale. Both bounds
+    /// live in [`crate::panel::Series::book_equity_usd_as_of`].
+    Value,
 }
 
 /// One configuration of the backtest.
@@ -363,6 +381,29 @@ pub struct BacktestConfig {
     /// the count is not transferable and the proportion is preserved instead.
     #[serde(with = "rust_decimal::serde::str_option")]
     pub size_floor_fraction: Option<Decimal>,
+
+    /// SHA-256 of the filings file, when one was supplied.
+    ///
+    /// Same rules as [`BacktestConfig::marketcap_sha256`], and it exists for the
+    /// same reason. The filings decide which book value each name is valued on,
+    /// so a refetch that fills in one more filing changes which names were held
+    /// under an identical rule.
+    pub filings_sha256: Option<String>,
+
+    /// How many days after its publication a filing may still be used.
+    ///
+    /// `Some(548)` for the value program, `None` for every program that reads no
+    /// filings. Eighteen months, which is what Fama and French's own
+    /// construction tolerates: their June formation reads the fiscal year ending
+    /// in the previous calendar year, so accounting data is up to eighteen
+    /// months old by the time it stops being used.
+    ///
+    /// Optional rather than zero for the reason
+    /// [`BacktestConfig::liquidity_floor_fraction`] gives. Whether a staleness
+    /// bound exists at all and how long it is are two different questions, and a
+    /// bound of zero would mean only same-day filings count, which is a real
+    /// configuration rather than a way to spell "no bound".
+    pub book_staleness_days: Option<usize>,
 }
 
 impl BacktestConfig {
@@ -418,6 +459,7 @@ impl BacktestConfig {
                 ..Self::lowvol_v0(universe_sha256)
             }),
             (CONSERVATIVE_PROGRAM, None) => Some(Self::conservative_v0(universe_sha256)),
+            (VALUE_PROGRAM, None) => Some(Self::value_v0(universe_sha256)),
             // Listed in the registry with nothing to build. Unreachable while
             // the two agree, and the registry walk in the CLI tests is what
             // notices when they stop agreeing.
@@ -454,6 +496,8 @@ impl BacktestConfig {
             payout_share_average_months: None,
             payout_dividend_trailing_months: None,
             size_floor_fraction: None,
+            filings_sha256: None,
+            book_staleness_days: None,
         }
     }
 
@@ -493,6 +537,40 @@ impl BacktestConfig {
             payout_dividend_trailing_months: Some(12),
             // 0.5, written as `5 * 10^-1` so the scale is explicit.
             size_floor_fraction: Some(Decimal::new(5, 1)),
+            ..Self::momentum_v0(universe_sha256)
+        }
+    }
+
+    /// The value configuration.
+    ///
+    /// Book-to-market, highest quintile, equal weight, monthly. Every constant
+    /// that is not about the signal is momentum's, deliberately, so the
+    /// difference between this trial and the others is the signal and not the
+    /// scaffolding.
+    ///
+    /// # Deviations from Fama and French, all recorded before any result existed
+    ///
+    /// *Book equity* is `equityusd` as shipped, plain shareholders' equity.
+    /// FF1992 adds balance-sheet deferred taxes; FF1993 adds deferred taxes and
+    /// the investment tax credit and subtracts the book value of preferred
+    /// stock; the three canonical definitions conflict with each other. This
+    /// vendor ships no balance-sheet deferred-tax or preferred-stock column at
+    /// all, so plain equity is the vendor-constrained choice rather than a
+    /// preference.
+    ///
+    /// *The visibility rule* uses actual filing dates. FF impose a blanket
+    /// six-month minimum lag because they could not see filing dates; this rail
+    /// can, so the deviation is an improvement rather than a shortcut, and the
+    /// 548-day staleness bound is what replaces the upper half of their window.
+    ///
+    /// *Financials are included.* FF1992 excludes them. The French library's own
+    /// live BE/ME portfolios include them, this vendor ships no sector column,
+    /// and so exclusion is not implementable from anything on disk. Recorded as
+    /// both forced and aligned with the library.
+    pub fn value_v0(universe_sha256: impl Into<String>) -> Self {
+        Self {
+            strategy: Strategy::Value,
+            book_staleness_days: Some(548),
             ..Self::momentum_v0(universe_sha256)
         }
     }

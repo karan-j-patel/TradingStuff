@@ -314,6 +314,16 @@ fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineErro
         });
     }
 
+    // Once more, one dataset over again. Filings decide which book value each
+    // name is valued on, so a run that read them without recording which file
+    // they came from is not reproducible from the log.
+    if config.filings_sha256.is_some() != panel.filings_attached() {
+        return Err(EngineError::FilingsWiringMismatch {
+            config_has_filings: config.filings_sha256.is_some(),
+            panel_has_filings: panel.filings_attached(),
+        });
+    }
+
     // Presence agreeing is not identity agreeing. Every check above asks only
     // whether a dataset was named and attached, and a configuration recording
     // the digest of file A while the panel holds file B passes all three. That
@@ -340,6 +350,11 @@ fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineErro
             "market cap",
             config.marketcap_sha256.as_deref(),
             panel.marketcaps_sha256(),
+        ),
+        (
+            "filings",
+            config.filings_sha256.as_deref(),
+            panel.filings_sha256(),
         ),
     ] {
         if let (Some(recorded), Some(attached)) = (recorded, attached)
@@ -368,6 +383,26 @@ fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineErro
             dividends: panel.dividends_attached(),
             delistings: panel.delistings_attached(),
             marketcaps: panel.marketcaps_attached(),
+        });
+    }
+
+    // The value program refuses the degraded run rather than producing one, on
+    // the rule the conservative formula follows. Without filings it has no book
+    // value and no signal at all; without market caps it has no denominator;
+    // without dividends its returns are price returns and without delistings its
+    // exits are unimputed, and a value figure published under either of those is
+    // a different strategy wearing this one's name.
+    if config.strategy == Strategy::Value
+        && !(panel.dividends_attached()
+            && panel.delistings_attached()
+            && panel.marketcaps_attached()
+            && panel.filings_attached())
+    {
+        return Err(EngineError::ValueMissingInputs {
+            dividends: panel.dividends_attached(),
+            delistings: panel.delistings_attached(),
+            marketcaps: panel.marketcaps_attached(),
+            filings: panel.filings_attached(),
         });
     }
 
@@ -409,6 +444,15 @@ pub fn schedule(panel: &Panel, config: &BacktestConfig) -> Result<Vec<Rebalance>
     // never advance past its first formation.
     if config.rebalance_every_months == 0 {
         return Err(EngineError::RebalanceStrideZero);
+    }
+    // Refused rather than wrapped. The filing age arithmetic compares i64
+    // days, and a bound the cast cannot hold would wrap negative and mark
+    // every filing stale, emptying the book silently instead of refusing the
+    // configuration that asked for it.
+    if let Some(days) = config.book_staleness_days
+        && i64::try_from(days).is_err()
+    {
+        return Err(EngineError::BookStalenessOutOfRange { days });
     }
     let stride = config.rebalance_every_months;
 

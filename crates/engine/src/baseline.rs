@@ -53,9 +53,9 @@ pub const LINEAR_BASELINE_NOTE_CONSERVATIVE: &str = "The strategy is itself a li
 /// was satisfied when it was not.
 pub fn linear_baseline_note(strategy: crate::config::Strategy) -> &'static str {
     match strategy {
-        crate::config::Strategy::Momentum | crate::config::Strategy::LowVolatility => {
-            LINEAR_BASELINE_NOTE
-        }
+        crate::config::Strategy::Momentum
+        | crate::config::Strategy::LowVolatility
+        | crate::config::Strategy::Value => LINEAR_BASELINE_NOTE,
         crate::config::Strategy::ConservativeFormula => LINEAR_BASELINE_NOTE_CONSERVATIVE,
     }
 }

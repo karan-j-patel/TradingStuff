@@ -18,6 +18,7 @@ use crate::schema::{AssetKey, CloseKind, PermanentId, SessionScope};
 /// The refusals and the reader's strictness checks. Split out only for size;
 /// they share the fixtures above.
 mod corporate_actions;
+mod filings;
 mod from_bytes;
 mod marketcap;
 mod ordering;

@@ -50,14 +50,15 @@ pub mod panel;
 pub mod portfolio;
 pub mod run;
 pub mod turnover;
+pub mod value;
 
 #[cfg(test)]
 mod tests;
 
 pub use config::{
     BacktestConfig, CONSERVATIVE_PROGRAM, DELISTING_CONVENTION, LOWVOL_PROGRAM, PROGRAM, RUNNABLE,
-    Strategy, VARIANT_LIQUIDITY_SCREENED, VARIANT_PRICE_FLOOR_10, VARIANT_VALUE_WEIGHTED,
-    Weighting,
+    Strategy, VALUE_PROGRAM, VARIANT_LIQUIDITY_SCREENED, VARIANT_PRICE_FLOOR_10,
+    VARIANT_VALUE_WEIGHTED, Weighting,
 };
 pub use error::EngineError;
 pub use momentum::FormationCensus;

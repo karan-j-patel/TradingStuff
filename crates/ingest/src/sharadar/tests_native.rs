@@ -344,24 +344,135 @@ fn n2_a_tied_sort_token_on_a_different_row_still_errors() {
     );
 }
 
+/// A tie group that fills a whole page is refused rather than walked.
+///
+/// # Why this test changed meaning
+///
+/// It used to assert that this exact fixture SUCCEEDS, and it did, by luck: the
+/// one-row overlap pinned the last row and the fake happened to serve the tie in
+/// a stable order. A reordering backend turns the same sequence into silent
+/// corruption, which is what `n2_a_reordered_tie_group_across_a_page_boundary_is_refused`
+/// now shows.
+///
+/// With the overlap widened to the whole tie group, this fixture is the
+/// degenerate case: all three rows of a three-row page share one token, so any
+/// overlap covering the group is the entire page and `skip` cannot advance. The
+/// walk cannot make progress and says so.
+///
+/// The property the old assertion was reaching for, that a legitimate tie walks
+/// cleanly, is real and is covered by
+/// `n2_a_tie_group_smaller_than_a_page_walks_cleanly`, on a fixture where the
+/// group actually fits.
 #[test]
-fn n2_a_tie_with_a_genuinely_identical_overlap_row_succeeds() {
-    // The other half, so the check above cannot be satisfied by refusing every
-    // tie. Same tokens, and the overlap row really is the row already held.
+fn n2_a_tie_group_filling_a_whole_page_is_refused() {
     let page_two = envelope(&[
         price_row("2022-08-22", "3", "3"),
         price_row("2022-08-23", "4", "4"),
     ]);
     let fake = Fake::serving(WIRE_STOCKS, &[tied_page_one(), page_two]);
 
+    let error = window(&paging_client(&fake))
+        .expect_err("a tie group filling a page cannot be walked past");
+
+    assert!(matches!(error, SourceError::Malformed { .. }));
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("2022-08-22"),
+        "the refusal must name the token the page is tied on: {rendered}"
+    );
+    assert!(
+        rendered.contains("page size"),
+        "the refusal must say what would fix it: {rendered}"
+    );
+}
+
+/// A tie group smaller than a page walks cleanly and yields every row once.
+///
+/// The other half of the guard, so it cannot be satisfied by refusing every tie.
+/// Two of the three rows share a token, the group fits inside the page with a
+/// row to spare, and the overlap re-serves both of them in the same order.
+#[test]
+fn n2_a_tie_group_smaller_than_a_page_walks_cleanly() {
+    // Page size three. The last two rows tie, so the group is two of three.
+    let page_one = envelope(&[
+        price_row("2022-08-22", "1", "1"),
+        price_row("2022-08-23", "2", "2"),
+        price_row("2022-08-23", "3", "3"),
+    ]);
+    // Requested with a two-row overlap, so the whole tie group repeats and the
+    // page is short, which ends the walk.
+    let page_two = envelope(&[
+        price_row("2022-08-23", "2", "2"),
+        price_row("2022-08-23", "3", "3"),
+    ]);
+    let fake = Fake::serving(WIRE_STOCKS, &[page_one, page_two]);
+
     let rows = window(&paging_client(&fake)).expect("a legitimate tie must walk cleanly");
 
     let closes: Vec<String> = rows.iter().map(|row| row.close.to_string()).collect();
     assert_eq!(
         closes,
-        ["1", "2", "3", "4"],
+        ["1", "2", "3"],
         "every row exactly once across a tied boundary"
     );
+    assert!(
+        fake.seen.borrow()[1].contains("skip=1"),
+        "the second page must be requested with an overlap covering the whole \
+         tie group, which is two rows back from the page end, got {}",
+        fake.seen.borrow()[1]
+    );
+}
+
+/// The reviewer's sequence: a tie group reordered between two requests.
+///
+/// # The silent loss this closes
+///
+/// Page size two, three rows tied on one token. The walk asks for [A, B] and
+/// holds B as the boundary. The backend reorders the tie to [C, B, A] between
+/// requests. The overlap request returns [B, A]; its first row IS B, so a
+/// check that compares only the boundary row passes, and the walk collects
+/// [A, B, A]. A is duplicated, C is never seen, and nothing errors.
+///
+/// The one-row overlap pins the boundary row and says nothing about the order
+/// of the tie group around it, which is exactly the case where the order is the
+/// only thing that decides which rows exist.
+#[test]
+fn n2_a_reordered_tie_group_across_a_page_boundary_is_refused() {
+    // Three rows sharing one token, served two at a time.
+    let page_one = envelope(&[
+        price_row("2022-08-22", "1", "1"),
+        price_row("2022-08-22", "2", "2"),
+    ]);
+    // The tie reordered underneath the walk: B still leads, so the boundary row
+    // matches, but A follows it where C should have.
+    let page_two = envelope(&[
+        price_row("2022-08-22", "2", "2"),
+        price_row("2022-08-22", "1", "1"),
+    ]);
+    // A short third page that lines up with the one-row overlap, so the OLD
+    // walk terminates cleanly and returns its corrupted result rather than
+    // tripping over an exhausted fixture. Without this the test would pass
+    // against the unfixed walk for the wrong reason, which is how it was
+    // written the first time and caught by running it against the old code.
+    let page_three = envelope(&[price_row("2022-08-22", "1", "1")]);
+    let fake = Fake::serving(WIRE_STOCKS, &[page_one, page_two, page_three]);
+
+    match window(&client(&fake).with_page_size(2)) {
+        Err(error) => {
+            assert!(matches!(error, SourceError::Malformed { .. }));
+            assert!(
+                error.to_string().contains("2022-08-22"),
+                "the refusal must name the sort token: {error}"
+            );
+        }
+        Ok(rows) => {
+            let closes: Vec<String> = rows.iter().map(|row| row.close.to_string()).collect();
+            panic!(
+                "a reordered tie group was walked silently and returned {closes:?}: one row \
+                 duplicated and the third member of the tie never served at all, with no error"
+            );
+        }
+    }
 }
 
 // --- N3: table names and the silent-empty guard ----------------------------

@@ -145,6 +145,21 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
             size_floor_fraction: Some(rust_decimal::Decimal::new(5, 1)),
             ..base.clone()
         },
+        // Which filings the book values came from is a property of the file. A
+        // refetch that fills in one more filing changes which names were held
+        // under an identical rule, so the file has to reach the hash on its own.
+        BacktestConfig {
+            filings_sha256: Some("1".repeat(64)),
+            ..base.clone()
+        },
+        // How old a filing may be is half the visibility rule. Two runs at 548
+        // and at 365 days hold different names out of the same data, so they are
+        // two hypotheses about what counts as current rather than one measured
+        // twice.
+        BacktestConfig {
+            book_staleness_days: Some(548),
+            ..base.clone()
+        },
     ];
 
     // One mutation per field. If the struct grows a field, this count is the
@@ -264,6 +279,20 @@ fn the_canonical_form_is_sorted_and_compact() {
     // highest first byte any field name here starts with.
     assert!(
         canonical.ends_with(r#","weighting":"equal"}"#),
+        "got {canonical}"
+    );
+
+    // The two fields this round added sort inside those ends rather than past
+    // them, which is why both pins above still read the same. Asserted rather
+    // than assumed: a field named after `weighting` would move the tail pin and
+    // a field before `actions_sha256` would move the head one, and either would
+    // move every recorded hash while looking like a rename.
+    assert!(
+        canonical.contains(r#""book_staleness_days":null"#),
+        "got {canonical}"
+    );
+    assert!(
+        canonical.contains(r#""filings_sha256":null"#),
         "got {canonical}"
     );
 }

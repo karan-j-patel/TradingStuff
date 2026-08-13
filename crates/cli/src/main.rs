@@ -101,6 +101,12 @@ enum Command {
         /// a run against a refetched file is a different trial
         #[arg(long, requires = "prices")]
         marketcap: Option<PathBuf>,
+        /// Curated filings Parquet. Its `equityusd` is the book equity the
+        /// value signal reads, taken from the latest filing published on or
+        /// before each formation. Its SHA-256 goes into the configuration hash,
+        /// so a run against a refetched file is a different trial
+        #[arg(long, requires = "prices")]
+        filings: Option<PathBuf>,
     },
 
     /// Report which data providers this machine is configured for
@@ -145,6 +151,7 @@ fn main() -> ExitCode {
             actions,
             delistings,
             marketcap,
+            filings,
         } => backtest::Strategy::from_args(
             config.as_deref(),
             variant.as_deref(),
@@ -153,6 +160,7 @@ fn main() -> ExitCode {
             actions.as_ref(),
             delistings.as_ref(),
             marketcap.as_ref(),
+            filings.as_ref(),
         )
         .and_then(|strategy| backtest::run(&trials, &program, variant.as_deref(), &strategy)),
         Command::Ingest { action } => ingest::run(action.as_ref()),

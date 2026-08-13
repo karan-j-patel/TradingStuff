@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 
 use super::{asset, bar, dec, lowvol_config, month_ends, panel_of};
 use crate::config::{
-    BacktestConfig, CONSERVATIVE_PROGRAM, LOWVOL_PROGRAM, PROGRAM, RUNNABLE,
+    BacktestConfig, CONSERVATIVE_PROGRAM, LOWVOL_PROGRAM, PROGRAM, RUNNABLE, VALUE_PROGRAM,
     VARIANT_LIQUIDITY_SCREENED, VARIANT_PRICE_FLOOR_10, VARIANT_VALUE_WEIGHTED,
 };
 use crate::liquidity;
@@ -451,6 +451,7 @@ fn the_door_resolves_exactly_the_pairs_the_registry_lists() {
         PROGRAM,
         LOWVOL_PROGRAM,
         CONSERVATIVE_PROGRAM,
+        VALUE_PROGRAM,
         "no-such-program",
     ];
     for (program, variant) in RUNNABLE {
