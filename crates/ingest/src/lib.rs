@@ -25,8 +25,8 @@ pub mod universe;
 
 pub use actions::{
     ActionRecord, ActionReject, Convention, CorporateAction, Delisting, DelistingReason,
-    DelistingReject, DividendKind, Listing, TerminalValue, convention_for, imputed_count,
-    validate_action, validate_delisting,
+    DelistingReject, DividendKind, Listing, TerminalValue, convention_for, flat_convention_for,
+    imputed_count, validate_action, validate_delisting,
 };
 pub use adjust::{
     AdjustedPoint, AdjustedSeries, AdjustmentMode, UnexplainedStep, adjust, unexplained_steps,

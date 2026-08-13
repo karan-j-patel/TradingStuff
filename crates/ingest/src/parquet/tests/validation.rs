@@ -55,8 +55,8 @@ fn m4_write_delistings_refuses_a_record_with_no_source() {
     );
     anonymous.source = String::new();
 
-    let error =
-        write_delistings(vec![anonymous], &path).expect_err("a sourceless record must be refused");
+    let error = write_delistings(vec![anonymous], &path, "synthetic")
+        .expect_err("a sourceless record must be refused");
     assert!(
         matches!(error, CurateError::InvalidRecords { .. }),
         "got {error:?}"
@@ -80,8 +80,8 @@ fn m4_write_delistings_refuses_a_return_below_total_loss() {
         TerminalValue::Observed(dec("-2")),
     );
 
-    let error =
-        write_delistings(vec![impossible], &path).expect_err("an impossible return is refused");
+    let error = write_delistings(vec![impossible], &path, "synthetic")
+        .expect_err("an impossible return is refused");
     assert!(
         matches!(error, CurateError::InvalidRecords { .. }),
         "got {error:?}"

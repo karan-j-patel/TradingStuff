@@ -91,13 +91,23 @@ pub fn buy_and_hold(
             let open = series.close_on(from).ok_or_else(|| {
                 EngineError::math("pricing a buy-and-hold holding at month start")
             })?;
+            // The same delisting treatment the strategy loop applies, through
+            // the same two helpers. This loop is a second copy of the return
+            // arithmetic and always has been, so a haircut wired into
+            // `portfolio::advance` alone would leave the baseline exiting at a
+            // price the strategy no longer uses, and it would beat the strategy
+            // on treatment rather than on selection.
             let (close, exited) = match series.close_on(to) {
                 Some(close) => (close, false),
                 None => {
-                    let (_, last) = series.last_close_on_or_before(to).ok_or_else(|| {
+                    let (last_bar, last) = series.last_close_on_or_before(to).ok_or_else(|| {
                         EngineError::math("pricing a delisted buy-and-hold holding")
                     })?;
-                    (last, true)
+                    let mark = series.exit_mark_in(last_bar, to);
+                    let marked = last.checked_mul(mark.terminal_factor()?).ok_or_else(|| {
+                        EngineError::math("marking a delisted buy-and-hold holding at exit")
+                    })?;
+                    (marked, true)
                 }
             };
             if open <= Decimal::ZERO {

@@ -30,7 +30,8 @@ fn t4_an_empty_batch_is_refused_rather_than_written() {
     );
     assert!(!path.exists(), "nothing may be written for an empty batch");
 
-    let error = write_delistings(Vec::new(), &path).expect_err("an empty batch must refuse");
+    let error =
+        write_delistings(Vec::new(), &path, "synthetic").expect_err("an empty batch must refuse");
     assert!(matches!(error, CurateError::EmptyDataset { .. }));
 }
 
@@ -126,6 +127,15 @@ const PRICE_META: &[(&str, &str)] = &[
     (crate::parquet::SOURCE_KEY, "synthetic"),
 ];
 
+/// The same for a delistings file, whose `final_market_cap` column is a vendor
+/// figure in millions. Supplied by every test of some *other* reader invariant,
+/// or they would all fail on the metadata check before reaching the thing they
+/// are about.
+const DELISTING_META: &[(&str, &str)] = &[
+    (crate::parquet::UNITS_KEY, crate::parquet::UNITS),
+    (crate::parquet::SOURCE_KEY, "synthetic"),
+];
+
 fn utf8(values: Vec<Option<&str>>) -> ArrayRef {
     Arc::new(StringArray::from(values))
 }
@@ -157,9 +167,10 @@ fn t5_observed_with_a_null_value_is_refused() {
             utf8(vec![Some("observed")]),
             decimal_column(vec![None]),
             utf8(vec![None]),
+            decimal_column(vec![None]),
             utf8(vec![Some("synthetic")]),
         ],
-        &[],
+        DELISTING_META,
     );
 
     let error = read_delistings(&path).expect_err("observed with no value must be refused");
@@ -189,9 +200,10 @@ fn t5_observed_with_a_convention_is_refused() {
             utf8(vec![Some("observed")]),
             decimal_column(vec![Some(-550_000_000)]),
             utf8(vec![Some("shumway_warther_1999_nasdaq")]),
+            decimal_column(vec![None]),
             utf8(vec![Some("synthetic")]),
         ],
-        &[],
+        DELISTING_META,
     );
 
     let error = read_delistings(&path).expect_err("observed with a convention must be refused");
@@ -220,14 +232,52 @@ fn t5_imputed_without_a_convention_is_refused() {
             utf8(vec![Some("imputed")]),
             decimal_column(vec![Some(-550_000_000)]),
             utf8(vec![None]),
+            decimal_column(vec![None]),
             utf8(vec![Some("synthetic")]),
         ],
-        &[],
+        DELISTING_META,
     );
 
     let error = read_delistings(&path).expect_err("imputed with no convention must be refused");
     assert!(
         matches!(error, CurateError::TerminalInvariant { .. }),
+        "got {error:?}"
+    );
+}
+
+/// A delistings file with no units metadata is refused before a row is read.
+///
+/// The same rule the market cap reader applies, and for the same reason: the
+/// `final_market_cap` column is a vendor figure in millions, and the two
+/// candidate readings of it differ by a factor of a million. `write_delistings`
+/// always writes the label, so a file without one came from something other
+/// than this crate.
+#[test]
+fn t5_a_delistings_file_with_no_units_metadata_is_refused() {
+    let path = scratch("t5-delistings-nometa").join("delistings.parquet");
+
+    write_raw(
+        &path,
+        super::delistings::schema(),
+        vec![
+            utf8(vec![Some("GONE")]),
+            utf8(vec![None]),
+            utf8(vec![None]),
+            Arc::new(Date32Array::from(vec![18_000])),
+            utf8(vec![Some("bankruptcy")]),
+            utf8(vec![Some("nasdaq")]),
+            utf8(vec![Some("unknown")]),
+            decimal_column(vec![None]),
+            utf8(vec![None]),
+            decimal_column(vec![None]),
+            utf8(vec![Some("synthetic")]),
+        ],
+        &[],
+    );
+
+    let error = read_delistings(&path).expect_err("a file with no units must be refused");
+    assert!(
+        matches!(error, CurateError::MissingMetadata { .. }),
         "got {error:?}"
     );
 }
@@ -253,9 +303,10 @@ fn t5_a_half_null_identity_is_refused() {
             utf8(vec![Some("unknown")]),
             decimal_column(vec![None]),
             utf8(vec![None]),
+            decimal_column(vec![None]),
             utf8(vec![Some("synthetic")]),
         ],
-        &[],
+        DELISTING_META,
     );
 
     let error = read_delistings(&path).expect_err("a half-null identity must be refused");

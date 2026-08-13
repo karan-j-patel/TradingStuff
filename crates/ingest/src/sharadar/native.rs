@@ -101,7 +101,7 @@ const MARKETCAP_FIELDS: &str = "ticker,date,marketcap";
 /// vendor's dividend-adjusted close, and storing it beside cash dividends that
 /// the engine adds to returns itself would be the same distribution counted
 /// twice.
-const ACTION_FIELDS: &str = "ticker,date,action,value";
+pub(super) const ACTION_FIELDS: &str = "ticker,date,action,value";
 
 /// The one action kind this fetch asks for and the only one it accepts.
 ///
@@ -127,6 +127,19 @@ struct Envelope {
 /// One row, read by key.
 pub(crate) struct NativeRow<'a> {
     fields: &'a Map<String, Value>,
+}
+
+impl<'a> NativeRow<'a> {
+    /// Wrap a row built in a test, so a decoder can be exercised on the JSON
+    /// shape the host ships without a network.
+    ///
+    /// Test-only, because the production path always builds these inside
+    /// [`SharadarClient::fetch_native`] and a second construction site would be
+    /// a way to skip the page-boundary check.
+    #[cfg(test)]
+    pub(crate) fn for_test(fields: &'a Map<String, Value>) -> Self {
+        NativeRow { fields }
+    }
 }
 
 impl NativeRow<'_> {
@@ -179,6 +192,22 @@ impl NativeRow<'_> {
             return Ok(None);
         }
         self.date(column).map(Some)
+    }
+
+    /// A number that the vendor is allowed to ship as JSON null.
+    ///
+    /// Null and zero are different answers and this keeps them apart. A missing
+    /// *column* is still an error, because [`NativeRow::is_null`] goes through
+    /// [`NativeRow::cell`], so the tolerance is for a null value and not for a
+    /// response that dropped the field.
+    pub(crate) fn optional_decimal(
+        &self,
+        column: &str,
+    ) -> Result<Option<rust_decimal::Decimal>, SourceError> {
+        if self.is_null(column)? {
+            return Ok(None);
+        }
+        self.decimal(column).map(Some)
     }
 }
 

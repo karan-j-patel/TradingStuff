@@ -137,8 +137,24 @@ pub enum Convention {
     /// Nasdaq Data and Its Implications for the Size Effect", Journal of
     /// Finance 54(6):2361-2379. Performance delistings, Nasdaq.
     ///
-    /// Larger than the NYSE/AMEX figure because the Nasdaq bias is 4.7 times
-    /// as severe. Applying this correction eliminates the Nasdaq size effect.
+    /// # Why this variant exists and is not used by the engine
+    ///
+    /// Two corrections to what this comment said before 2026-08-12, both of
+    /// which had been repeating a misreading.
+    ///
+    /// The 4.7 figure is a delisting *frequency*, not a severity. Nasdaq
+    /// securities delist for performance about 4.7 times as often as NYSE and
+    /// AMEX ones do, which is why the aggregate bias is larger there. It is not
+    /// a claim that a Nasdaq delisting loses 4.7 times as much.
+    ///
+    /// The -55% itself embeds a bid-ask component, because it is measured from
+    /// the last quoted price rather than from a price a holder could transact
+    /// at. Rule 3 already charges spread on every exit in this engine, so
+    /// applying this figure here would charge the same spread twice.
+    ///
+    /// So the variant stays in the enum for honesty about what the literature
+    /// says, and nothing in the engine selects it. See [`flat_convention_for`]
+    /// for what the engine does select.
     ShumwayWarther1999Nasdaq,
     /// Zero. CRSP's own convention when a merger's final consideration is
     /// unknown or paid through distributions, on the reasoning that the last
@@ -204,11 +220,51 @@ impl DelistingReason {
             self,
             DelistingReason::Bankruptcy
                 | DelistingReason::ExchangeRule
+                // Corrected 2026-08-12. The original routing sent a voluntary
+                // delisting to the zero convention, which is the merger
+                // treatment, and it was written before the classification
+                // research existed.
+                //
+                // Shumway and Warther (1999) classify the company-request
+                // delisting codes 570, 572 and 573 as performance-related, and
+                // the CIZ delisting set Jensen, Kelly and Pedersen (2023) work
+                // from includes CORQ, company request. A company that asks an
+                // exchange to remove it is usually asking on its way down, and
+                // treating that as a merger assumes the holder got paid.
+                | DelistingReason::Voluntary
                 // Conservative. An unclassified delisting treated as a merger
                 // would bias results optimistic, which is the direction this
                 // whole correction exists to avoid.
                 | DelistingReason::Unknown
         )
+    }
+}
+
+/// The convention the backtest engine applies, which does not consult the
+/// listing venue.
+///
+/// # Why flat rather than [`convention_for`]
+///
+/// Jensen, Kelly and Pedersen (2023), Journal of Finance 78(5), state the rule
+/// for a dataset with no delisting returns available at all: every
+/// performance-based delisting takes -30 percent, following Shumway (1997).
+/// That is this platform's situation, because the retail vendor behind it
+/// publishes no delisting return on any row.
+///
+/// Splitting by venue would mean reaching for the -55 percent Nasdaq figure,
+/// and [`Convention::ShumwayWarther1999Nasdaq`] records why that figure is the
+/// wrong instrument here. So the venue is not consulted, and
+/// [`Delisting::listing`] is stored without being used by the engine.
+///
+/// A separate function rather than `convention_for(reason, Listing::Other)`,
+/// which returns the same pair today. The two answer different questions, and
+/// an edit to the unidentified-venue arm of `convention_for` must not silently
+/// move what the engine charges.
+pub fn flat_convention_for(reason: DelistingReason) -> Convention {
+    if reason.is_performance_related() {
+        Convention::Shumway1997NyseAmex
+    } else {
+        Convention::CrspMergerUnknown
     }
 }
 
@@ -232,9 +288,11 @@ pub fn convention_for(reason: DelistingReason, listing: Listing) -> Convention {
 ///
 /// The most consequential known bias in equity research comes from omitting the
 /// return between the last quoted price and whatever holders actually received.
-/// Shumway (1997) found this bias in Nasdaq data to be 4.7 times the documented
-/// NYSE/AMEX bias, and correcting it left no evidence the Nasdaq size effect had
-/// ever existed.
+/// Shumway and Warther (1999) found performance delistings to be about 4.7
+/// times as frequent on Nasdaq as on NYSE and AMEX, and correcting the
+/// aggregate bias left no evidence the Nasdaq size effect had ever existed.
+/// Note what that figure is: a frequency, not a severity. The same misreading
+/// is corrected on [`Convention::ShumwayWarther1999Nasdaq`].
 ///
 /// Retail data providers do not publish a delisting return. The row simply
 /// stops, and a backtest reading that as "position closed at the last price"
@@ -244,8 +302,28 @@ pub struct Delisting {
     pub asset: AssetKey,
     pub date: Date,
     pub reason: DelistingReason,
+    /// Which venue the security was listed on. Stored, and deliberately not
+    /// consulted by the backtest engine. See [`flat_convention_for`].
     pub listing: Listing,
     pub terminal: TerminalValue,
+    /// The security's last market capitalisation, in millions of US dollars
+    /// exactly as the vendor shipped it, when the source row carried one.
+    ///
+    /// # This is a size, not a return, and it never enters return arithmetic
+    ///
+    /// Measured 2026-08-12 across fifteen exit rows, the vendor's `value` field
+    /// on a delisting is byte-identical to that security's market
+    /// capitalisation on the same date in the daily metrics table. It says how
+    /// big the company was when it stopped trading. It says nothing about what
+    /// a holder received, so treating it as a terminal value would put a figure
+    /// in the millions where a fraction belongs.
+    ///
+    /// `None` is legal and common. Fund wind-ups ship the field as JSON null.
+    /// Zero is a real figure rather than a missing one, observed on a
+    /// bankruptcy liquidation, which is why this is an `Option` and not a
+    /// sentinel.
+    #[serde(default)]
+    pub final_market_cap: Option<Decimal>,
     pub source: String,
 }
 
@@ -366,6 +444,7 @@ mod tests {
             reason: DelistingReason::Bankruptcy,
             listing: Listing::Nasdaq,
             terminal: TerminalValue::Observed(dec(-0.92)),
+            final_market_cap: None,
             source: "test".into(),
         };
         let mut unknown = known.clone();
@@ -383,6 +462,7 @@ mod tests {
             reason,
             listing,
             terminal: TerminalValue::Unknown,
+            final_market_cap: None,
             source: "test".into(),
         }
     }
@@ -436,6 +516,70 @@ mod tests {
         d.terminal = TerminalValue::Observed(dec(-0.92));
         let after = d.imputed();
         assert_eq!(after.terminal, TerminalValue::Observed(dec(-0.92)));
+    }
+
+    /// Every reason's classification and the convention it routes to, all six
+    /// spelled out.
+    ///
+    /// # Why a table and not one assertion per interesting variant
+    ///
+    /// A blind falsification round rewrote `is_performance_related` twice as
+    /// the complement of a shorter list, `!matches!(Merger | Voluntary)` and
+    /// `!matches!(Merger | Acquired)`. Both compile, both read as a tidier way
+    /// to say the same thing, and each silently moves whichever variants the
+    /// author did not think about. The first flipped `Acquired` to
+    /// performance-related, a 30 percentage-point swing on the terminal value
+    /// of every acquired holding, and nothing in the suite failed.
+    ///
+    /// A test that asserts only the variants somebody found interesting cannot
+    /// catch that, because the whole failure mode is a variant nobody was
+    /// thinking about. So this asserts all six, and a rewrite that moves any
+    /// one of them fails here whichever direction it moves.
+    ///
+    /// `every_convention_agrees_with_what_imputed_produces` in `validate.rs`
+    /// walks the same six and is not this test. It checks that the imputed
+    /// value is self-consistent with whatever convention was selected, never
+    /// which convention was selected, so it passes identically whether a
+    /// voluntary delisting imputes 0 or -0.55. It is the shape `CLAUDE.md`
+    /// warns about: a test that mentions the variant and defends nothing
+    /// about it.
+    #[test]
+    fn every_reason_routes_to_the_convention_the_round_settled_on() {
+        // (reason, performance-related, what the engine's flat rule charges)
+        let expected = [
+            (DelistingReason::Merger, false, Decimal::ZERO),
+            // Not performance-related, and the one the complement rewrite
+            // moved. An acquisition's last traded price already reflected the
+            // announced deal, exactly as a merger's does.
+            (DelistingReason::Acquired, false, Decimal::ZERO),
+            (DelistingReason::Bankruptcy, true, dec(-0.30)),
+            (DelistingReason::ExchangeRule, true, dec(-0.30)),
+            // Corrected 2026-08-12. See the note on `is_performance_related`.
+            (DelistingReason::Voluntary, true, dec(-0.30)),
+            (DelistingReason::Unknown, true, dec(-0.30)),
+        ];
+
+        for (reason, performance_related, charged) in expected {
+            assert_eq!(
+                reason.is_performance_related(),
+                performance_related,
+                "{reason:?} changed which class it belongs to"
+            );
+            assert_eq!(
+                flat_convention_for(reason).value(),
+                charged,
+                "{reason:?} routes to a convention charging a different figure"
+            );
+        }
+
+        // The table covers the enum rather than a subset of it. A variant added
+        // later without a row here leaves that variant unpinned, which is the
+        // state this test exists to end.
+        assert_eq!(
+            expected.len(),
+            6,
+            "a delisting reason was added or removed without updating this table"
+        );
     }
 
     #[test]

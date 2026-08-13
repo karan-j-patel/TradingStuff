@@ -49,9 +49,13 @@ pub mod run;
 mod tests;
 
 pub use config::{
-    BacktestConfig, LOWVOL_PROGRAM, PROGRAM, RUNNABLE, Strategy, VARIANT_LIQUIDITY_SCREENED,
-    VARIANT_PRICE_FLOOR_10,
+    BacktestConfig, DELISTING_CONVENTION, LOWVOL_PROGRAM, PROGRAM, RUNNABLE, Strategy,
+    VARIANT_LIQUIDITY_SCREENED, VARIANT_PRICE_FLOOR_10,
 };
 pub use error::EngineError;
-pub use panel::Panel;
-pub use run::{CAVEATS, CAVEATS_WITH_DIVIDENDS, Report, backtest, caveats};
+pub use panel::{ExitMark, Panel};
+pub use portfolio::ExitCensus;
+pub use run::{
+    CAVEATS, CAVEATS_WITH_DELISTINGS, CAVEATS_WITH_DIVIDENDS,
+    CAVEATS_WITH_DIVIDENDS_AND_DELISTINGS, Report, backtest, caveats,
+};

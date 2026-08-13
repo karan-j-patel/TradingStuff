@@ -60,6 +60,8 @@ pub enum Strategy<'a> {
         prices: &'a Path,
         universe: &'a Path,
         actions: Option<&'a Path>,
+        /// Curated delistings, which classify the exits the engine detects.
+        delistings: Option<&'a Path>,
     },
 }
 
@@ -74,27 +76,37 @@ impl<'a> Strategy<'a> {
         prices: Option<&'a PathBuf>,
         universe: Option<&'a PathBuf>,
         actions: Option<&'a PathBuf>,
+        delistings: Option<&'a PathBuf>,
     ) -> anyhow::Result<Self> {
         match (config, prices, universe) {
-            // `--actions` and `--variant` are refused here rather than ignored.
-            // A run that was asked for dividends and quietly produced price
-            // returns is the exact mislabelling the engine's wiring guard
-            // exists to prevent, and it would arrive with a hash saying no
-            // actions were used. A variant asked for and never applied is the
-            // same failure: the recorded hash would be the config string's, and
-            // nothing in the log would say a variant had been requested.
+            // `--actions`, `--delistings` and `--variant` are refused here
+            // rather than ignored. A run that was asked for dividends and
+            // quietly produced price returns is the exact mislabelling the
+            // engine's wiring guard exists to prevent, and it would arrive with
+            // a hash saying no actions were used. A delistings file asked for
+            // and never applied is the same failure one dataset over. A variant
+            // asked for and never applied is the same failure again: the
+            // recorded hash would be the config string's, and nothing in the
+            // log would say a variant had been requested.
             //
-            // Clap does not catch either one, which was measured rather than
-            // assumed. Both arguments carry `requires = "prices"`, and
+            // Clap does not catch any of them, which was measured rather than
+            // assumed. All three arguments carry `requires = "prices"`, and
             // `--config` conflicts with `--prices`, which suppresses the
             // requirement instead of failing on it.
-            (Some(config), None, None) if actions.is_none() && variant.is_none() => {
+            (Some(config), None, None)
+                if actions.is_none() && delistings.is_none() && variant.is_none() =>
+            {
                 Ok(Strategy::Declared(config))
             }
             (Some(_), None, None) if variant.is_some() => anyhow::bail!(
                 "--variant selects a robustness variant of a program the engine runs, and \
                  --config declares a configuration with no engine behind it, so the two \
                  cannot go together"
+            ),
+            (Some(_), None, None) if delistings.is_some() => anyhow::bail!(
+                "--delistings imputes delisting returns in an engine run, and --config \
+                 declares a configuration with no engine behind it, so the two cannot go \
+                 together"
             ),
             (Some(_), None, None) => anyhow::bail!(
                 "--actions applies cash dividends to an engine run, and --config declares a \
@@ -104,6 +116,7 @@ impl<'a> Strategy<'a> {
                 prices: prices.as_path(),
                 universe: universe.as_path(),
                 actions: actions.map(PathBuf::as_path),
+                delistings: delistings.map(PathBuf::as_path),
             }),
             _ => anyhow::bail!(
                 "give either --config, for a configuration with no engine behind it, or \
@@ -186,7 +199,8 @@ fn evaluate(
             prices,
             universe,
             actions,
-        } => engine_run(program, variant, prices, universe, *actions),
+            delistings,
+        } => engine_run(program, variant, prices, universe, *actions, *delistings),
     }
 }
 
@@ -196,6 +210,7 @@ fn engine_run(
     prices: &Path,
     universe: &Path,
     actions: Option<&Path>,
+    delistings: Option<&Path>,
 ) -> (ConfigHash, Outcome) {
     // Used only when the configuration itself cannot be resolved, which happens
     // when the universe file cannot be read or the program names no
@@ -213,7 +228,7 @@ fn engine_run(
         )
     };
 
-    let (config, members) = match resolve(program, variant, universe, actions) {
+    let (config, members) = match resolve(program, variant, universe, actions, delistings) {
         Ok(resolved) => resolved,
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
@@ -222,7 +237,7 @@ fn engine_run(
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
 
-    match execute(prices, actions, &members, &config) {
+    match execute(prices, actions, delistings, &members, &config) {
         Ok(report) => (config_hash, Outcome::Ran(Box::new(report))),
         Err(error) => (config_hash, Outcome::Failed(format!("{error:#}"))),
     }
@@ -241,11 +256,18 @@ fn engine_run(
 /// refused rather than defaulted, because a run recorded under a program name
 /// that does not describe what ran is a mislabelled trial, and the config hash
 /// exists to make exactly that impossible.
+///
+/// The delistings file contributes a convention name rather than a hash of its
+/// bytes. What changes the arithmetic is the rule, and two runs under the same
+/// rule over a refetched file that classifies one more name are the same
+/// hypothesis measured against slightly more data. The unexplained-exit count
+/// printed beside the result is what makes that difference visible.
 fn resolve(
     program: &str,
     variant: Option<&str>,
     universe: &Path,
     actions: Option<&Path>,
+    delistings: Option<&Path>,
 ) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>)> {
     let text = std::fs::read_to_string(universe)
         .with_context(|| format!("reading the universe file {}", universe.display()))?;
@@ -256,14 +278,19 @@ fn resolve(
         .map_err(|error| anyhow::anyhow!("universe file line {}: {}", error.line, error.source))?;
     let members = entries.into_iter().map(|entry| entry.asset).collect();
 
-    let actions_sha256 = match actions {
-        None => None,
-        Some(path) => {
-            let bytes = std::fs::read(path)
-                .with_context(|| format!("reading the actions file {}", path.display()))?;
-            Some(rigor::hash_bytes(&bytes))
-        }
+    // Both datasets, one rule. Hashed over the bytes on disk, so the recorded
+    // value is what `shasum` prints for the same file, and a refetch that
+    // changed nothing records the same trial.
+    let hash_file = |path: Option<&Path>, dataset: &str| -> anyhow::Result<Option<String>> {
+        path.map(|path| {
+            std::fs::read(path)
+                .map(|bytes| rigor::hash_bytes(&bytes))
+                .with_context(|| format!("reading the {dataset} file {}", path.display()))
+        })
+        .transpose()
     };
+    let actions_sha256 = hash_file(actions, "actions")?;
+    let delistings_sha256 = hash_file(delistings, "delistings")?;
 
     let config = BacktestConfig::for_program(program, variant, sha256).ok_or_else(|| {
         // Listed from the registry rather than written out, so a pair added
@@ -288,6 +315,8 @@ fn resolve(
     Ok((
         BacktestConfig {
             actions_sha256,
+            delisting_convention: delistings.map(|_| engine::DELISTING_CONVENTION.to_string()),
+            delistings_sha256,
             ..config
         },
         members,
@@ -297,6 +326,7 @@ fn resolve(
 fn execute(
     prices: &Path,
     actions: Option<&Path>,
+    delistings: Option<&Path>,
     members: &HashSet<AssetKey>,
     config: &BacktestConfig,
 ) -> anyhow::Result<Report> {
@@ -347,6 +377,31 @@ fn execute(
             println!(
                 "  {} were not cash dividends and changed no return",
                 panel.non_cash_actions()
+            );
+            panel
+        }
+    };
+
+    // Attached on the same rule and in the same place. The engine refuses a
+    // panel whose delisting state disagrees with the configuration, so a
+    // mistake here fails loudly rather than publishing an imputation nothing
+    // recorded.
+    let panel = match delistings {
+        None => panel,
+        Some(path) => {
+            let records = ingest::parquet::read_delistings(path)
+                .with_context(|| format!("reading curated delistings from {}", path.display()))?;
+            let read = records.len();
+            let panel = panel.with_delistings(&records)?;
+            println!("Read {read} delistings from {}.", path.display());
+            println!(
+                "  performance-related exits are imputed at the {} convention; \
+                 mergers exit at their last close",
+                engine::DELISTING_CONVENTION
+            );
+            println!(
+                "  {} named a security outside the universe file",
+                panel.unmatched_delistings()
             );
             panel
         }

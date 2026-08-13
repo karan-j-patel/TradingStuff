@@ -228,6 +228,7 @@ fn e7_a_run_appends_one_entry_carrying_the_engine_sharpe() {
             prices: &prices,
             universe: &universe,
             actions: None,
+            delistings: None,
         },
     )
     .expect("the momentum backtest runs");
@@ -274,6 +275,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
             prices: &prices,
             universe: &universe,
             actions: None,
+            delistings: None,
         },
     )
     .expect("first run");
@@ -299,6 +301,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
             prices: &prices,
             universe: &universe,
             actions: None,
+            delistings: None,
         },
     )
     .expect("second run");
@@ -348,6 +351,7 @@ fn an_engine_failure_still_records_a_trial() {
             prices: &missing,
             universe: &universe,
             actions: None,
+            delistings: None,
         },
     )
     .expect("a failed engine is still a completed command");
@@ -387,6 +391,7 @@ fn an_unresolvable_configuration_still_records_a_trial() {
             prices: &missing,
             universe: &missing,
             actions: None,
+            delistings: None,
         },
     )
     .expect("a failed engine is still a completed command");
@@ -403,41 +408,81 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
     let universe = PathBuf::from("universe.jsonl");
 
     let actions = PathBuf::from("actions.parquet");
+    let delistings = PathBuf::from("delistings.parquet");
 
     assert!(matches!(
-        Strategy::from_args(Some("free text"), None, None, None, None),
+        Strategy::from_args(Some("free text"), None, None, None, None, None),
         Ok(Strategy::Declared(_))
     ));
     assert!(matches!(
-        Strategy::from_args(None, None, Some(&prices), Some(&universe), None),
-        Ok(Strategy::Momentum { actions: None, .. })
+        Strategy::from_args(None, None, Some(&prices), Some(&universe), None, None),
+        Ok(Strategy::Momentum {
+            actions: None,
+            delistings: None,
+            ..
+        })
     ));
     assert!(matches!(
-        Strategy::from_args(None, None, Some(&prices), Some(&universe), Some(&actions)),
+        Strategy::from_args(
+            None,
+            None,
+            Some(&prices),
+            Some(&universe),
+            Some(&actions),
+            None
+        ),
         Ok(Strategy::Momentum {
             actions: Some(_),
+            delistings: None,
+            ..
+        })
+    ));
+    assert!(matches!(
+        Strategy::from_args(
+            None,
+            None,
+            Some(&prices),
+            Some(&universe),
+            None,
+            Some(&delistings)
+        ),
+        Ok(Strategy::Momentum {
+            actions: None,
+            delistings: Some(_),
             ..
         })
     ));
     for bad in [
-        Strategy::from_args(None, None, None, None, None),
-        Strategy::from_args(None, None, Some(&prices), None, None),
+        Strategy::from_args(None, None, None, None, None, None),
+        Strategy::from_args(None, None, Some(&prices), None, None, None),
         Strategy::from_args(
             Some("free text"),
             None,
             Some(&prices),
             Some(&universe),
             None,
+            None,
         ),
         // Dividends with no engine behind them. Accepting this would record a
         // hash saying an actions file was used by a run that never opened one.
-        Strategy::from_args(Some("free text"), None, None, None, Some(&actions)),
+        Strategy::from_args(Some("free text"), None, None, None, Some(&actions), None),
+        // Delistings with no engine behind them, the same failure one dataset
+        // over. The recorded hash would name the imputation convention while
+        // nothing had imputed anything.
+        Strategy::from_args(Some("free text"), None, None, None, None, Some(&delistings)),
         // A variant with no engine behind it, which clap does not refuse on its
         // own. Measured 2026-08-11: `--config` conflicts with `--prices`, and
         // that conflict suppresses the `requires = "prices"` on `--variant`,
         // so the pair reached this function and a Declared trial was recorded
         // naming a variant that nothing ever applied.
-        Strategy::from_args(Some("free text"), Some("price-floor-10"), None, None, None),
+        Strategy::from_args(
+            Some("free text"),
+            Some("price-floor-10"),
+            None,
+            None,
+            None,
+            None,
+        ),
     ] {
         assert!(bad.is_err(), "an impossible combination was accepted");
     }
@@ -471,6 +516,343 @@ fn fixture_actions(name: &str) -> PathBuf {
     path
 }
 
+/// A curated delistings file beside the fixture dataset.
+///
+/// It names a security the universe does not hold, so it classifies nothing.
+/// That is deliberate and it is what makes `e11j` discriminating: the returns
+/// are identical between a run with this file and one without, so the only
+/// thing that can move the recorded hash is the file itself.
+fn fixture_delistings(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("backtest-cli-{name}"));
+    fs::create_dir_all(&dir).expect("creating the fixture directory");
+    let path = dir.join("delistings.parquet");
+
+    let record = ingest::Delisting {
+        asset: AssetKey {
+            ticker: "ZZZ".to_string(),
+            permanent: Some(PermanentId::Sharadar(99)),
+        },
+        date: date(2021, 2, 15),
+        reason: ingest::DelistingReason::Bankruptcy,
+        listing: ingest::Listing::Other,
+        terminal: ingest::TerminalValue::Unknown,
+        final_market_cap: None,
+        source: "Synthetic".to_string(),
+    };
+    ingest::parquet::write_delistings(vec![record], &path, "Synthetic")
+        .expect("writing the fixture delistings");
+    path
+}
+
+/// E11m. The exit block follows the delistings flag, both ways.
+///
+/// "unexplained" is dataset vocabulary. On a run with no delistings file every
+/// exit lands in that bucket by construction, so printing the word claims a
+/// dataset looked and found nothing when none was consulted. The bare run keeps
+/// the single line it printed before this round; only an attached run earns the
+/// three-state split.
+#[test]
+fn e11m_the_exit_block_follows_the_delistings_flag() {
+    let (prices, universe) = fixture_dataset("exit-block");
+    let delistings = fixture_delistings("exit-block");
+    let sha256 = rigor::hash_bytes(fs::read_to_string(&universe).expect("read").as_bytes());
+    let bars = ingest::parquet::read_prices(&prices).expect("read prices");
+
+    let bare = engine::backtest(
+        &Panel::from_bars(bars.clone()).expect("panel builds"),
+        &BacktestConfig::momentum_v0(&sha256),
+    )
+    .expect("the fixture backtests");
+
+    let records = ingest::parquet::read_delistings(&delistings).expect("read delistings");
+    let attached = engine::backtest(
+        &Panel::from_bars(bars)
+            .expect("panel builds")
+            .with_delistings(&records)
+            .expect("delistings attach"),
+        &BacktestConfig {
+            delisting_convention: Some(engine::DELISTING_CONVENTION.to_string()),
+            delistings_sha256: Some(rigor::hash_bytes(
+                &fs::read(&delistings).expect("read delistings bytes"),
+            )),
+            ..BacktestConfig::momentum_v0(&sha256)
+        },
+    )
+    .expect("the fixture backtests");
+
+    let bare_block = report::exit_block(&bare);
+    let attached_block = report::exit_block(&attached);
+
+    assert_eq!(
+        bare_block,
+        format!(
+            "  delisting exits:         {}",
+            bare.strategy.delisting_exits
+        ),
+        "a run with no delistings file printed something other than the single \
+         line it printed before this round"
+    );
+    for word in ["unexplained", "imputed", "observed"] {
+        assert!(
+            !bare_block.contains(word),
+            "the bare run's exit block says {word:?}, which is vocabulary only a \
+             delistings dataset can supply, got {bare_block}"
+        );
+    }
+
+    for word in [
+        "unexplained",
+        "imputed at the convention",
+        "observed from data",
+    ] {
+        assert!(
+            attached_block.contains(word),
+            "an attached run must report the three states, {word:?} is missing \
+             from {attached_block}"
+        );
+    }
+    assert_ne!(
+        bare_block, attached_block,
+        "the printer ignored the flag, so both runs publish the same vocabulary"
+    );
+}
+
+/// E11j. Supplying a delistings file moves the recorded hash, and both runs
+/// produce a figure.
+///
+/// The mirror of `e8g`, and the reason the amendment exists. Which securities
+/// the convention reached is a property of the file rather than of the rule, so
+/// two runs against two different delistings files are two trials even under
+/// one convention.
+///
+/// This fixture classifies nothing, so the two runs produce the **same**
+/// Sharpe. That is asserted rather than avoided. It is what separates the
+/// property under test, that the file reaches the hash, from the uninteresting
+/// case where the hash moved because the arithmetic changed. `e8g` cannot make
+/// that separation because a dividend necessarily moves the returns.
+#[test]
+fn e11j_the_recorded_hash_moves_when_delistings_are_supplied() {
+    let path = temp_log("delistings-hash");
+    let (prices, universe) = fixture_dataset("delistings-hash");
+    let delistings = fixture_delistings("delistings-hash");
+
+    for supplied in [None, Some(&delistings)] {
+        let code = run(
+            &path,
+            engine::PROGRAM,
+            None,
+            &Strategy::Momentum {
+                prices: &prices,
+                universe: &universe,
+                actions: None,
+                delistings: supplied.map(PathBuf::as_path),
+            },
+        )
+        .expect("the momentum backtest runs");
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    let log = TrialLog::load(&path).expect("reload");
+    log.verify().expect("the chain verifies");
+
+    let entries: Vec<_> = log.entries().iter().skip(1).collect();
+    assert_eq!(entries.len(), 2, "each run must record its own trial");
+    assert!(
+        entries.iter().all(|entry| entry.sharpe.is_some()),
+        "both runs must have produced a figure, or the hashes differ for the \
+         uninteresting reason that one of them failed"
+    );
+    assert_eq!(
+        entries[0].sharpe, entries[1].sharpe,
+        "the fixture was supposed to classify nothing, so a moved Sharpe means \
+         the hash below could have moved for the arithmetic rather than the file"
+    );
+    assert_ne!(
+        entries[0].config_hash, entries[1].config_hash,
+        "a run against a delistings file and one without recorded as the same \
+         trial, so a refetch that explains one more name would be invisible to \
+         the log"
+    );
+}
+
+/// E11k. Two different delistings files under one convention are two trials.
+///
+/// This is the guarantee the amendment was made for, and `e11j` does not hold
+/// it. With no file at all, `delisting_convention` alone moves the hash, so
+/// `e11j` passes even when `delistings_sha256` never reaches the canonical
+/// form. Measured, not assumed: under a `#[serde(skip_serializing)]` mutation
+/// on that field, `e7` and the sorted-form pin both failed and `e11j` stayed
+/// green.
+///
+/// So this run holds the convention fixed and varies only the file's bytes,
+/// which is the shape a refetch takes. It is the mirror of
+/// `e7_the_recorded_config_hash_follows_the_universe_file`, one dataset over,
+/// and it fails against a CLI that writes anything but the file's own hash into
+/// the field.
+#[test]
+fn e11k_the_recorded_hash_follows_the_delistings_file() {
+    let path = temp_log("delistings-file");
+    let (prices, universe) = fixture_dataset("delistings-file");
+    let delistings = fixture_delistings("delistings-file");
+
+    let backtest = || {
+        run(
+            &path,
+            engine::PROGRAM,
+            None,
+            &Strategy::Momentum {
+                prices: &prices,
+                universe: &universe,
+                actions: None,
+                delistings: Some(delistings.as_path()),
+            },
+        )
+        .expect("the momentum backtest runs")
+    };
+
+    assert_eq!(backtest(), ExitCode::SUCCESS);
+    let first = fs::read(&delistings).expect("read the fixture bytes");
+
+    // A second file classifying a different security, which is what a refetch
+    // that explains one more name looks like. The convention is untouched, so
+    // the only thing that can move the recorded hash is the file.
+    let second = ingest::Delisting {
+        asset: AssetKey {
+            ticker: "YYY".to_string(),
+            permanent: Some(PermanentId::Sharadar(98)),
+        },
+        date: date(2021, 2, 15),
+        reason: ingest::DelistingReason::Bankruptcy,
+        listing: ingest::Listing::Other,
+        terminal: ingest::TerminalValue::Unknown,
+        final_market_cap: None,
+        source: "Synthetic".to_string(),
+    };
+    ingest::parquet::write_delistings(vec![second], &delistings, "Synthetic")
+        .expect("rewriting the fixture delistings");
+    assert_ne!(
+        fs::read(&delistings).expect("read the rewritten bytes"),
+        first,
+        "the rewrite produced identical bytes, so this test cannot discriminate"
+    );
+
+    assert_eq!(backtest(), ExitCode::SUCCESS);
+
+    let log = TrialLog::load(&path).expect("reload");
+    log.verify().expect("the chain verifies");
+    let entries = log.trials();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries.iter().all(|entry| entry.sharpe.is_some()),
+        "a run failed, so the recorded hashes are the fallback rather than a \
+         configuration"
+    );
+    assert_ne!(
+        entries[0].config_hash, entries[1].config_hash,
+        "two different delistings files recorded as the same configuration, so a \
+         refetch that explains one more name is invisible to the log and the \
+         second result is not reproducible from it"
+    );
+}
+
+/// E11l. The recorded hash is over the delistings file's BYTES, not over the
+/// records it decodes to.
+///
+/// # Why e11k does not hold this
+///
+/// e11k varies the file's content, so its two files differ in bytes *and* in
+/// records, and a hash taken over either one distinguishes them. A blind
+/// falsification round replaced the byte hash with a hash of the decoded
+/// records, on the entirely reasonable-sounding ground that the file is read
+/// twice today and the engine only ever sees the records. Nothing failed.
+///
+/// The contract is bytes, matching `actions_sha256`. Over-counting trials when
+/// a refetch changes a byte without changing what the run sees is the safe
+/// direction: it makes the deflated Sharpe's denominator larger and every
+/// reported probability more conservative. Hashing the records inverts that,
+/// and inverts it silently.
+///
+/// # The fixture
+///
+/// Two files holding the identical rows, written under different file-level
+/// provenance. `write_delistings` puts its `source` argument in the parquet
+/// key-value metadata while each row carries its own `source` column, so the
+/// two files differ in bytes and decode to records that compare equal. Both
+/// halves are asserted, because the test means nothing if either is untrue.
+#[test]
+fn e11l_the_recorded_hash_is_over_the_delistings_bytes_not_its_records() {
+    let path = temp_log("delistings-bytes");
+    let (prices, universe) = fixture_dataset("delistings-bytes");
+    let dir = std::env::temp_dir().join("backtest-cli-delistings-bytes");
+    fs::create_dir_all(&dir).expect("creating the fixture directory");
+
+    let record = ingest::Delisting {
+        asset: AssetKey {
+            ticker: "ZZZ".to_string(),
+            permanent: Some(PermanentId::Sharadar(99)),
+        },
+        date: date(2021, 2, 15),
+        reason: ingest::DelistingReason::Bankruptcy,
+        listing: ingest::Listing::Other,
+        terminal: ingest::TerminalValue::Unknown,
+        final_market_cap: None,
+        source: "Synthetic".to_string(),
+    };
+
+    // Same rows, different file-level provenance. A refetch from a second
+    // vendor connector is one real way this arises.
+    let first = dir.join("delistings-first.parquet");
+    let second = dir.join("delistings-second.parquet");
+    ingest::parquet::write_delistings(vec![record.clone()], &first, "Synthetic")
+        .expect("writing the first fixture");
+    ingest::parquet::write_delistings(vec![record], &second, "Synthetic-refetched")
+        .expect("writing the second fixture");
+
+    assert_ne!(
+        fs::read(&first).expect("read first"),
+        fs::read(&second).expect("read second"),
+        "the two fixtures are byte-identical, so this test cannot discriminate"
+    );
+    assert_eq!(
+        ingest::parquet::read_delistings(&first).expect("read first records"),
+        ingest::parquet::read_delistings(&second).expect("read second records"),
+        "the two fixtures decode to different records, so a record hash would \
+         distinguish them too and this test would pass for the wrong reason"
+    );
+
+    for file in [&first, &second] {
+        let code = run(
+            &path,
+            engine::PROGRAM,
+            None,
+            &Strategy::Momentum {
+                prices: &prices,
+                universe: &universe,
+                actions: None,
+                delistings: Some(file.as_path()),
+            },
+        )
+        .expect("the momentum backtest runs");
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    let log = TrialLog::load(&path).expect("reload");
+    log.verify().expect("the chain verifies");
+    let entries = log.trials();
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries.iter().all(|entry| entry.sharpe.is_some()),
+        "a run failed, so the recorded hashes are the fallback rather than a \
+         configuration"
+    );
+    assert_ne!(
+        entries[0].config_hash, entries[1].config_hash,
+        "two byte-different delistings files recorded as the same configuration, \
+         so the hash is over the decoded records rather than over the file and \
+         the over-counting direction the contract relies on has been inverted"
+    );
+}
+
 /// E8g. Supplying an actions file moves the recorded hash, and both runs
 /// produce a figure.
 ///
@@ -493,6 +875,7 @@ fn e8g_the_recorded_hash_moves_when_actions_are_supplied() {
                 prices: &prices,
                 universe: &universe,
                 actions: supplied.map(PathBuf::as_path),
+                delistings: None,
             },
         )
         .expect("the momentum backtest runs");
@@ -588,6 +971,7 @@ fn the_program_selects_the_configuration_the_run_is_recorded_under() {
                 prices: &prices,
                 universe: &universe,
                 actions: None,
+                delistings: None,
             },
         )
         .expect("the backtest runs");
@@ -634,6 +1018,7 @@ fn an_unknown_program_produces_no_figure() {
             prices: &prices,
             universe: &universe,
             actions: None,
+            delistings: None,
         },
     )
     .expect("a refused configuration is still a completed command");
@@ -682,6 +1067,7 @@ fn e10c_a_variant_reaches_the_log_as_the_bare_program() {
                 prices: &prices,
                 universe: &universe,
                 actions: None,
+                delistings: None,
             },
         )
         .expect("the backtest runs");
@@ -749,6 +1135,7 @@ fn e10d_every_runnable_pair_hashes_distinctly() {
                 prices: &prices,
                 universe: &universe,
                 actions: None,
+                delistings: None,
             },
         )
         .expect("the backtest runs");
@@ -825,6 +1212,7 @@ fn e10e_an_unknown_variant_produces_no_figure() {
                 prices: &prices,
                 universe: &universe,
                 actions: None,
+                delistings: None,
             },
         )
         .expect("a refused configuration is still a completed command");

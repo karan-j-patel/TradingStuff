@@ -87,6 +87,13 @@ enum Command {
         /// so a run with dividends is a different trial from one without
         #[arg(long, requires = "prices")]
         actions: Option<PathBuf>,
+        /// Curated delistings Parquet. It classifies the exits the engine
+        /// already detects, so performance-related ones are imputed at the
+        /// published convention instead of exiting at an unimputed last close.
+        /// The convention name goes into the configuration hash, so a run that
+        /// imputes is a different trial from one that does not
+        #[arg(long, requires = "prices")]
+        delistings: Option<PathBuf>,
     },
 
     /// Report which data providers this machine is configured for
@@ -120,12 +127,14 @@ fn main() -> ExitCode {
             prices,
             universe,
             actions,
+            delistings,
         } => backtest::Strategy::from_args(
             config.as_deref(),
             variant.as_deref(),
             prices.as_ref(),
             universe.as_ref(),
             actions.as_ref(),
+            delistings.as_ref(),
         )
         .and_then(|strategy| backtest::run(&trials, &program, variant.as_deref(), &strategy)),
         Command::Ingest { action } => ingest::run(action.as_ref()),

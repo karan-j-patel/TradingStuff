@@ -21,7 +21,7 @@ use crate::config::BacktestConfig;
 use crate::error::EngineError;
 use crate::momentum::{self, Rebalance};
 use crate::panel::Panel;
-use crate::portfolio::{self, Weights};
+use crate::portfolio::{self, ExitCensus, Weights};
 
 /// The caveat block for a run with no actions file behind it.
 ///
@@ -44,7 +44,7 @@ Returns are price returns from split and stock-dividend adjusted closes.
 /// One bias is gone and the other is not, so the closing line stops saying the
 /// direction is unknown and says which way it goes. That is a stronger claim
 /// than the block above makes and it is only true when the dividends are
-/// actually in the arithmetic, which is why the two literals are selected by
+/// actually in the arithmetic, which is why the literals are selected by
 /// [`caveats`] rather than edited into one.
 pub const CAVEATS_WITH_DIVIDENDS: &str = "\
 Returns include cash dividends on their ex-dates, on top of split and
@@ -55,17 +55,65 @@ Returns include cash dividends on their ex-dates, on top of split and
   The remaining known bias is UP. This is not a conservative
   estimate and must not be described as one.";
 
+/// The caveat block for a run that imputed delisting returns but applied no
+/// cash dividends.
+///
+/// The delisting bias is no longer stated as a direction, because it is no
+/// longer omitted. What replaces it is not a claim of accuracy, and the text
+/// says so. A convention is an assumption, and the dividend bias that survives
+/// this run still runs DOWN.
+///
+/// Written out in full rather than assembled from a shared fragment, on the
+/// rule the two blocks above already follow. Each block is one statement made
+/// as a whole, and a reader checking whether a published figure carried the
+/// right caveat should be able to read the literal that was published rather
+/// than reconstruct it from parts.
+pub const CAVEATS_WITH_DELISTINGS: &str = "\
+Returns are price returns from split and stock-dividend adjusted closes.
+  Cash dividends are absent from the data, which UNDERSTATES a long-only
+  total return, biasing it DOWN.
+  Performance-related exits are imputed at -30 percent applied to the last
+  close, following Shumway (1997) as Jensen, Kelly and Pedersen (2023) apply it
+  where a dataset publishes no delisting returns at all. Merger and acquisition
+  exits take the last close unchanged.
+  Exits the delistings dataset cannot explain still take the last close with no
+  imputation. Their count is printed above and is not zero by assumption.
+  The remaining known bias is DOWN. The delisting figure is an assumption
+  rather than a measurement, so these results are not assumption-free and
+  must not be described as conservative.";
+
+/// The caveat block for a run with both corrections applied.
+///
+/// This is the state the delisting round exists to reach, and the closing line
+/// is deliberately not a boast. No bias with a known direction is left, which
+/// is a different statement from the result being right. A published convention
+/// stands where a measurement would go, so the block refuses both
+/// "conservative" and "assumption-free".
+pub const CAVEATS_WITH_DIVIDENDS_AND_DELISTINGS: &str = "\
+Returns include cash dividends on their ex-dates, on top of split and
+  stock-dividend adjusted closes. Cash paid mid-month is held uninvested until
+  the next rebalance rather than reinvested on the day it arrives.
+  Performance-related exits are imputed at -30 percent applied to the last
+  close, following Shumway (1997) as Jensen, Kelly and Pedersen (2023) apply it
+  where a dataset publishes no delisting returns at all. Merger and acquisition
+  exits take the last close unchanged.
+  Exits the delistings dataset cannot explain still take the last close with no
+  imputation. Their count is printed above and is not zero by assumption.
+  No bias with a known direction remains. The delisting figure is an assumption
+  rather than a measurement, so these results are not assumption-free and
+  must not be described as conservative.";
+
 /// Which caveat block belongs to a run.
 ///
-/// A function rather than a caller deciding, because the two blocks make
-/// different claims about the direction of the remaining bias and picking the
-/// wrong one publishes a bias statement that is not true of the figure beside
-/// it.
-pub fn caveats(dividends_applied: bool) -> &'static str {
-    if dividends_applied {
-        CAVEATS_WITH_DIVIDENDS
-    } else {
-        CAVEATS
+/// A function rather than a caller deciding, because the blocks make different
+/// claims about what bias is left and picking the wrong one publishes a
+/// statement that is not true of the figure beside it.
+pub fn caveats(dividends_applied: bool, delistings_imputed: bool) -> &'static str {
+    match (dividends_applied, delistings_imputed) {
+        (false, false) => CAVEATS,
+        (true, false) => CAVEATS_WITH_DIVIDENDS,
+        (false, true) => CAVEATS_WITH_DELISTINGS,
+        (true, true) => CAVEATS_WITH_DIVIDENDS_AND_DELISTINGS,
     }
 }
 
@@ -77,8 +125,12 @@ pub struct Series {
     pub gross_monthly: Vec<Decimal>,
     /// Notional traded at each rebalance, as a fraction of portfolio value.
     pub traded: Vec<Decimal>,
-    /// Held names marked at a last close because they stopped trading.
+    /// Held names marked at a last close because they stopped trading. Equal to
+    /// `exits.total()`, and computed from it rather than counted twice.
     pub delisting_exits: usize,
+    /// How those exits were classified, which is what says how much of the
+    /// result rests on a convention rather than on data.
+    pub exits: ExitCensus,
 }
 
 /// Run the monthly loop with a caller-supplied choice of names.
@@ -97,7 +149,7 @@ pub fn run_schedule(
     let mut net_monthly = Vec::with_capacity(rebalances.len());
     let mut gross_monthly = Vec::with_capacity(rebalances.len());
     let mut traded = Vec::with_capacity(rebalances.len());
-    let mut delisting_exits = 0usize;
+    let mut exits = ExitCensus::default();
 
     for (index, rebalance) in rebalances.iter().enumerate() {
         let last = index + 1 == rebalances.len();
@@ -125,7 +177,7 @@ pub fn run_schedule(
 
         let advance =
             portfolio::advance(panel, &target, rebalance.date, rebalances[index + 1].date)?;
-        delisting_exits += advance.exits.len();
+        exits = exits.plus(advance.exit_census);
         gross_monthly.push(advance.gross_return);
         net_monthly.push(portfolio::net_of_cost(advance.gross_return, cost)?);
         held = advance.drifted;
@@ -135,7 +187,8 @@ pub fn run_schedule(
         net_monthly,
         gross_monthly,
         traded,
-        delisting_exits,
+        delisting_exits: exits.total(),
+        exits,
     })
 }
 
@@ -168,6 +221,9 @@ pub struct Report {
     /// Whether cash dividends are in these returns, which decides which caveat
     /// block the figures are published under.
     pub dividends_applied: bool,
+    /// Whether delisting returns were imputed in these returns, on the same
+    /// rule and for the same reason.
+    pub delistings_imputed: bool,
 }
 
 /// Run the momentum strategy and both baselines over a panel.
@@ -181,6 +237,24 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
         return Err(EngineError::DividendWiringMismatch {
             config_has_actions: config.actions_sha256.is_some(),
             panel_has_dividends: panel.dividends_attached(),
+        });
+    }
+    // The same guard for the same reason, one dataset over, and over two fields
+    // rather than one. A configuration naming a convention it never applied
+    // records a hash describing arithmetic that did not happen. A panel
+    // carrying classified exits under a configuration that names no convention
+    // publishes an imputation nothing in the trial log says was made. And a run
+    // that imputed without recording which file it classified from is not
+    // reproducible from the log, so the file hash has to travel with the
+    // convention rather than beside it.
+    let attached = panel.delistings_attached();
+    if config.delisting_convention.is_some() != attached
+        || config.delistings_sha256.is_some() != attached
+    {
+        return Err(EngineError::DelistingWiringMismatch {
+            config_has_convention: config.delisting_convention.is_some(),
+            config_has_hash: config.delistings_sha256.is_some(),
+            panel_has_delistings: attached,
         });
     }
 
@@ -272,6 +346,7 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
         // this function, and read off the panel because the panel is what the
         // arithmetic actually used.
         dividends_applied: panel.dividends_attached(),
+        delistings_imputed: panel.delistings_attached(),
         config: config.clone(),
     })
 }

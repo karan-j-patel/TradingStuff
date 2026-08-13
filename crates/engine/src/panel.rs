@@ -21,7 +21,10 @@
 
 use std::collections::BTreeMap;
 
-use ingest::actions::{ActionRecord, CorporateAction, DividendKind};
+use ingest::actions::{
+    ActionRecord, Convention, CorporateAction, Delisting, DividendKind, TerminalValue,
+    flat_convention_for,
+};
 use ingest::adjusted::AdjustedBar;
 use ingest::schema::{AssetKey, PermanentId};
 use jiff::civil::Date;
@@ -37,6 +40,82 @@ use crate::error::EngineError;
 struct CashDividend {
     ex_date: Date,
     amount: Decimal,
+}
+
+/// What the delistings dataset says about a holding that stopped trading.
+///
+/// Three states rather than an `Option<Decimal>`, mirroring
+/// [`ingest::TerminalValue`], because an assumed delisting return that cannot
+/// be told apart from a measured one is the same class of problem as a vendor's
+/// adjusted close. The report prints the three counts separately and any figure
+/// resting on the middle one has to be able to say so.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExitMark {
+    /// A delisting return that was measured. Nothing on the current vendor
+    /// produces one, and the state exists because a hand-curated file or a
+    /// second provider can.
+    Observed(Decimal),
+    /// A delisting return assumed from a published convention.
+    Imputed {
+        value: Decimal,
+        convention: Convention,
+    },
+    /// The delistings dataset has nothing that explains this exit, so the
+    /// holding keeps the pre-imputation treatment and is counted as
+    /// unexplained. Never silently treated as a merger, which would be an
+    /// assumption dressed up as an absence.
+    Unexplained,
+}
+
+impl ExitMark {
+    /// What the terminal mark is multiplied by.
+    ///
+    /// One for an unexplained exit and for the merger convention, so both leave
+    /// the last close exactly as it was. `Decimal` multiplication by one is
+    /// exact and changes no digit, which is what keeps a run with no delistings
+    /// attached identical to one from before this existed.
+    pub fn terminal_factor(&self) -> Result<Decimal, EngineError> {
+        let delisting_return = match self {
+            ExitMark::Observed(value) => *value,
+            ExitMark::Imputed { value, .. } => *value,
+            ExitMark::Unexplained => Decimal::ZERO,
+        };
+        Decimal::ONE
+            .checked_add(delisting_return)
+            .ok_or_else(|| EngineError::math("applying a delisting return to a terminal mark"))
+    }
+}
+
+/// One security's classified exit, resolved when the dataset is attached.
+///
+/// The convention is chosen here rather than at exit time because it is a
+/// property of the run, recorded in the configuration hash, and not a property
+/// of any one holding.
+#[derive(Debug, Clone, Copy)]
+struct ClassifiedExit {
+    date: Date,
+    mark: ExitMark,
+}
+
+/// Resolve one stored delisting into the mark the engine applies.
+///
+/// A record carrying an observed return is honoured, because that is a
+/// measurement and the whole point of keeping the three states apart. Anything
+/// else is imputed here under [`flat_convention_for`], including a record that
+/// already carries an imputation of its own. The stored one was chosen by
+/// whoever curated the file; this one is chosen by the configuration the trial
+/// log records, and only the second is described by the recorded hash.
+fn mark_of(delisting: &Delisting) -> ExitMark {
+    match delisting.terminal {
+        TerminalValue::Observed(value) => ExitMark::Observed(value),
+        TerminalValue::Imputed { .. } | TerminalValue::Unknown => {
+            let convention = flat_convention_for(delisting.reason);
+            ExitMark::Imputed {
+                value: convention.value(),
+                convention,
+            }
+        }
+    }
 }
 
 /// The deterministic sort key for a security.
@@ -64,6 +143,9 @@ pub struct Series {
     /// [`Panel::with_dividends`] attaches any, which is what keeps a run with
     /// no actions file byte-identical to one from before this existed.
     dividends: Vec<CashDividend>,
+    /// Classified exits, ascending by date. Empty until
+    /// [`Panel::with_delistings`] attaches any, on the same rule.
+    exits: Vec<ClassifiedExit>,
 }
 
 impl Series {
@@ -113,6 +195,36 @@ impl Series {
             }
         }
         Ok(total)
+    }
+
+    /// How the delistings dataset classifies an exit whose last bar is
+    /// `last_bar` and which was noticed on `as_of`.
+    ///
+    /// # Why the window has both ends
+    ///
+    /// The lower end is the probe's measurement. On five of five names checked
+    /// across 1999 and 2026 the last bar this vendor holds is dated exactly on
+    /// the exit action, so there is no post-exit price tail and an event is
+    /// never dated before the series stops.
+    ///
+    /// The upper end is what makes a temporary gap different from an exit, and
+    /// it is not decoration. A name that stops trading for one month and
+    /// resumes triggers the absent-bar rule at the gap, and its real delisting
+    /// years later is still an event dated after the last bar. Without the
+    /// upper bound that event would classify the gap, and a month of missing
+    /// data would be charged a delisting return. The bound is also what rule 4
+    /// requires of any accessor: nothing here may read a record dated after the
+    /// date being decided on.
+    ///
+    /// The first matching event wins. Events are ascending by date, and a
+    /// security with two exits inside one holding month is a data fault rather
+    /// than a case to arbitrate.
+    pub fn exit_mark_in(&self, last_bar: Date, as_of: Date) -> ExitMark {
+        self.exits
+            .iter()
+            .find(|exit| exit.date >= last_bar && exit.date <= as_of)
+            .map(|exit| exit.mark)
+            .unwrap_or(ExitMark::Unexplained)
     }
 
     /// The split-adjusted close on exactly `date`, if the security traded then.
@@ -256,6 +368,13 @@ pub struct Panel {
     unmatched_dividends: usize,
     /// Records that were not cash dividends, and so were not consumed.
     non_cash_actions: usize,
+    /// Whether a delistings dataset was attached at all, which is a different
+    /// question from whether any exit was classified. True after an attachment
+    /// that matched nothing, because the run still read a delistings file and
+    /// still reports imputed exits.
+    delistings_attached: bool,
+    /// Delisting records naming a security this panel does not hold.
+    unmatched_delistings: usize,
 }
 
 impl Panel {
@@ -287,6 +406,7 @@ impl Panel {
                 identity,
                 bars: by_date.into_values().collect(),
                 dividends: Vec::new(),
+                exits: Vec::new(),
             })
             .collect();
 
@@ -309,6 +429,8 @@ impl Panel {
             dividends_attached: false,
             unmatched_dividends: 0,
             non_cash_actions: 0,
+            delistings_attached: false,
+            unmatched_delistings: 0,
         })
     }
 
@@ -366,6 +488,8 @@ impl Panel {
             securities,
             dates,
             month_ends,
+            delistings_attached,
+            unmatched_delistings,
             ..
         } = self;
 
@@ -400,6 +524,73 @@ impl Panel {
             dividends_attached: true,
             unmatched_dividends,
             non_cash_actions,
+            delistings_attached,
+            unmatched_delistings,
+        })
+    }
+
+    /// A new panel carrying the classified exits in `delistings`.
+    ///
+    /// Consumes and returns, exactly as [`Panel::with_dividends`] does and for
+    /// the same reason. Attaching classifies only: nothing here decides that a
+    /// security stopped trading. That trigger is the absent bar in
+    /// [`crate::portfolio::advance`] and it is unchanged by this round, so a
+    /// delisting record for a name that kept trading changes nothing at all.
+    pub fn with_delistings(self, delistings: &[Delisting]) -> Result<Panel, EngineError> {
+        let mut by_identity: BTreeMap<String, Vec<ClassifiedExit>> = BTreeMap::new();
+        for record in delistings {
+            by_identity
+                .entry(identity(&record.asset))
+                .or_default()
+                .push(ClassifiedExit {
+                    date: record.date,
+                    mark: mark_of(record),
+                });
+        }
+
+        // Destructured for the same reason `with_dividends` is: `..self` cannot
+        // follow a move out of `self.securities`, and naming the carried-over
+        // fields means a future field cannot be forgotten silently.
+        let Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_attached,
+            unmatched_dividends,
+            non_cash_actions,
+            ..
+        } = self;
+
+        let mut unmatched_delistings = 0usize;
+        let securities: Vec<Series> = securities
+            .into_iter()
+            .map(|series| {
+                let mut exits = by_identity.remove(&series.identity).unwrap_or_default();
+                // Ascending by date, because the lookup takes the first match
+                // in the window and a fixture that happened to supply them
+                // sorted would otherwise be the only reason that held.
+                exits.sort_by_key(|exit| exit.date);
+                Series { exits, ..series }
+            })
+            .collect();
+
+        // Whatever is left named a security the panel does not hold. Counted
+        // rather than refused, on the same rule the dividend attachment
+        // follows: a universe file is a sample of the master, so a market-wide
+        // delistings file is expected to overhang it.
+        for leftover in by_identity.values() {
+            unmatched_delistings += leftover.len();
+        }
+
+        Ok(Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_attached,
+            unmatched_dividends,
+            non_cash_actions,
+            delistings_attached: true,
+            unmatched_delistings,
         })
     }
 
@@ -420,6 +611,16 @@ impl Panel {
     /// Action records that were not cash dividends, and so changed nothing.
     pub fn non_cash_actions(&self) -> usize {
         self.non_cash_actions
+    }
+
+    /// Whether a delistings file was attached, however little of it applied.
+    pub fn delistings_attached(&self) -> bool {
+        self.delistings_attached
+    }
+
+    /// Delisting records naming a security outside this panel.
+    pub fn unmatched_delistings(&self) -> usize {
+        self.unmatched_delistings
     }
 
     /// Last trading day of each calendar month present, ascending.

@@ -27,6 +27,7 @@ use clap::Subcommand;
 mod probe;
 mod probe_actions;
 mod probe_daily;
+mod probe_exits;
 mod probe_wire;
 mod universe;
 
@@ -60,6 +61,12 @@ pub enum Action {
         #[arg(long)]
         data_root: Option<String>,
     },
+
+    /// Report what the actions table ships for securities that stopped trading
+    ///
+    /// Reads a handful of rows and prints them. Writes nothing, counts no
+    /// trial, and draws no conclusion.
+    ProbeExits,
 
     /// Build the research universe from the whole security master
     ///
@@ -122,6 +129,7 @@ pub fn run(action: Option<&Action>) -> anyhow::Result<ExitCode> {
         Some(Action::ProbeSep) => return probe::run(),
         Some(Action::ProbeActions) => return probe_actions::run(),
         Some(Action::ProbeDaily { data_root }) => return probe_daily::run(data_root.as_deref()),
+        Some(Action::ProbeExits) => return probe_exits::run(),
         Some(Action::FetchUniverse { out }) => return universe::run(out),
         None => {}
     }

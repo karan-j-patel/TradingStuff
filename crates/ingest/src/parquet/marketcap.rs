@@ -209,56 +209,15 @@ pub fn marketcap_provenance(path: &Path) -> Result<MarketCapProvenance, CurateEr
 }
 
 /// Read both keys, refusing a file that does not declare what this reader needs.
+///
+/// The checking is in [`super::units_and_source`], shared with the delistings
+/// dataset, which stores a figure in the same units and carries the same
+/// factor-of-a-million hazard. Value-open on the source and pinned on the
+/// units, for the reasons recorded there.
 fn provenance_of(
     metadata: Option<&Vec<::parquet::file::metadata::KeyValue>>,
 ) -> Result<MarketCapProvenance, CurateError> {
-    let value = |key: &str| {
-        metadata
-            .into_iter()
-            .flatten()
-            .find(|entry| entry.key == key)
-            .and_then(|entry| entry.value.as_deref())
-    };
-
-    let units = match value(UNITS_KEY) {
-        Some(UNITS) => UNITS.to_owned(),
-        Some(other) => {
-            return Err(CurateError::UnexpectedMetadata {
-                dataset: DATASET,
-                key: UNITS_KEY,
-                expected: UNITS,
-                found: other.to_owned(),
-            });
-        }
-        None => {
-            return Err(CurateError::MissingMetadata {
-                dataset: DATASET,
-                key: UNITS_KEY,
-            });
-        }
-    };
-
-    let source = value(SOURCE_KEY)
-        .ok_or(CurateError::MissingMetadata {
-            dataset: DATASET,
-            key: SOURCE_KEY,
-        })?
-        .to_owned();
-    // Value-open on purpose. The platform is provider-abstracted and another
-    // vendor's legitimately curated file must stay readable, so the reader
-    // pins the units contract and RECORDS the source rather than gating on
-    // its value. What it will not accept is blank attribution: a file that
-    // cannot say where its rows came from is not provenance, and no writer
-    // here produces one.
-    if source.trim().is_empty() {
-        return Err(CurateError::UnexpectedMetadata {
-            dataset: DATASET,
-            key: SOURCE_KEY,
-            expected: "a non-empty source",
-            found: source,
-        });
-    }
-
+    let (units, source) = super::units_and_source(DATASET, UNITS, UNITS_KEY, metadata)?;
     Ok(MarketCapProvenance { units, source })
 }
 

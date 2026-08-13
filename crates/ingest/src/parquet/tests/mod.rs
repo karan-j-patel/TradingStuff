@@ -77,6 +77,10 @@ fn delisting(asset: AssetKey, date: Date, terminal: TerminalValue) -> Delisting 
         reason: DelistingReason::Bankruptcy,
         listing: Listing::Nasdaq,
         terminal,
+        // Absent by default. The one test that cares supplies its own value,
+        // so every other delisting fixture demonstrably exercises the null
+        // column rather than a number that happened to be lying around.
+        final_market_cap: None,
         source: "synthetic".into(),
     }
 }
@@ -165,7 +169,10 @@ fn t2_delistings_round_trip_and_keep_imputed_apart_from_observed() {
     );
 
     let input = vec![unknown.clone(), imputed.clone(), observed.clone()];
-    assert_eq!(write_delistings(input, &path).expect("write"), 3);
+    assert_eq!(
+        write_delistings(input, &path, "synthetic").expect("write"),
+        3
+    );
 
     let read = read_delistings(&path).expect("read");
     assert_eq!(read.len(), 3);
@@ -202,6 +209,80 @@ fn t2_delistings_round_trip_and_keep_imputed_apart_from_observed() {
 
     let expected = vec![observed, imputed, unknown];
     assert_eq!(read, expected);
+}
+
+/// The final market cap column keeps absent and zero apart across a round trip.
+///
+/// The same hazard the decoder carries, one layer down. A vendor exit row ships
+/// JSON null on a fund wind-up and a real zero on a bankruptcy liquidation, and
+/// a storage layer that collapsed the two would undo the decoder's care on the
+/// way to disk. The three rows are written in one batch so the null and the zero
+/// share a column chunk, which is where a collapse would happen.
+#[test]
+fn t2_the_final_market_cap_keeps_a_zero_apart_from_an_absent_figure() {
+    let path = scratch("t2-finalcap").join("delistings.parquet");
+
+    let mut absent = delisting(
+        sharadar("NONE", 111),
+        day(2021, 3, 1),
+        TerminalValue::Unknown,
+    );
+    absent.final_market_cap = None;
+    let mut zero = delisting(
+        sharadar("ZERO", 222),
+        day(2021, 3, 2),
+        TerminalValue::Unknown,
+    );
+    zero.final_market_cap = Some(dec("0"));
+    let mut real = delisting(
+        sharadar("REAL", 333),
+        day(2021, 3, 3),
+        TerminalValue::Unknown,
+    );
+    real.final_market_cap = Some(dec("2047.5"));
+
+    assert_eq!(
+        write_delistings(
+            vec![zero.clone(), real.clone(), absent.clone()],
+            &path,
+            "synthetic"
+        )
+        .expect("write"),
+        3
+    );
+    let read = read_delistings(&path).expect("read");
+
+    // Sorted by permanent id as a string: "111", "222", "333".
+    assert_eq!(
+        read[0].final_market_cap, None,
+        "an absent figure gained one"
+    );
+    assert_eq!(
+        read[1].final_market_cap,
+        Some(dec("0")),
+        "a real final market capitalisation of zero read back as absent"
+    );
+    assert_ne!(read[1].final_market_cap, read[0].final_market_cap);
+    assert_eq!(read[2].final_market_cap, Some(dec("2047.5")));
+    assert_eq!(read, vec![absent, zero, real]);
+}
+
+/// A written delistings file declares its own units and source.
+///
+/// The refusal half, that a file without the declaration is unreadable, lives
+/// in `strictness` beside the raw writer that can produce one.
+#[test]
+fn t2_a_delistings_file_declares_its_units_and_source() {
+    let path = scratch("t2-provenance").join("delistings.parquet");
+    let row = delisting(sharadar("GONE", 1), day(2021, 3, 1), TerminalValue::Unknown);
+    write_delistings(vec![row], &path, "synthetic").expect("write");
+
+    let declared = delistings_provenance(&path).expect("a written file declares itself");
+    assert_eq!(
+        declared.units, UNITS,
+        "the final market cap column is in vendor millions and the file must say so"
+    );
+    assert_eq!(declared.source, "synthetic");
 }
 
 // --- T3: decimal exactness --------------------------------------------------

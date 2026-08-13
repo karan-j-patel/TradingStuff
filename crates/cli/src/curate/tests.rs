@@ -200,7 +200,11 @@ fn curate_delistings_writes_a_file_the_reader_round_trips() {
     let input = jsonl(&dir, &[ONE_GOOD_DELISTING]);
 
     let dataset = Dataset::Delistings {
-        input,
+        input: Some(input),
+        fetch: false,
+        universe: None,
+        from: None,
+        to: None,
         data_root: Some(dir.to_string_lossy().into_owned()),
     };
     run(&dataset).expect("curating a valid delisting succeeds");
@@ -222,7 +226,11 @@ fn a_delisting_disagreeing_with_its_convention_fails_the_command() {
     let input = jsonl(&dir, &[ONE_GOOD_DELISTING, ONE_INCOHERENT_DELISTING]);
 
     let dataset = Dataset::Delistings {
-        input,
+        input: Some(input),
+        fetch: false,
+        universe: None,
+        from: None,
+        to: None,
         data_root: Some(dir.to_string_lossy().into_owned()),
     };
     let error = run(&dataset).expect_err("an incoherent delisting must fail the command");
@@ -250,7 +258,11 @@ fn a_delisting_losing_more_than_everything_fails_the_command() {
     let input = jsonl(&dir, &[ONE_IMPOSSIBLE_DELISTING]);
 
     let dataset = Dataset::Delistings {
-        input,
+        input: Some(input),
+        fetch: false,
+        universe: None,
+        from: None,
+        to: None,
         data_root: Some(dir.to_string_lossy().into_owned()),
     };
     let error = run(&dataset).expect_err("an impossible return must fail the command");

@@ -233,26 +233,37 @@ fn e4_a_delisted_name_exits_at_its_last_close_and_is_counted() {
 ///
 /// ```text
 ///          m2     m3   mid-May    m4     m5
-///   AAA    10     20      20       -      -
-///   BBB    10     20       -      20     20
+///   AAA    10     20      10       -      -
+///   BBB    10     20       -      10     10
 ///
 ///   entry at m2, equal weight, traded 1.0, cost 0.0010
 ///     m2->m3: both 20/10 - 1 = 1.0, gross = 1.0
 ///             net = (1 - 0.0010)(2.0) - 1                        =  0.998
 ///             weights stay 0.5 and 0.5, nothing has delisted yet
 ///
-///     m3->m4: AAA has no bar on m4 and is marked at its last close, 20,
-///             so its return is 20/20 - 1 = 0. BBB is also flat, gross = 0.
-///             AAA's half of the portfolio is sold at that last close:
+///     m3->m4: AAA has no bar on m4 and is marked at its LAST CLOSE, 10,
+///             against the 20 it was bought at, so its return is -0.5.
+///             BBB halves too, so the growth divides the weights exactly.
+///             gross = 0.5(-0.5) + 0.5(-0.5)                      = -0.5
+///             AAA's grown half = 0.5(0.5)/0.5 = 0.5, sold at that mark:
 ///               exit charge = 0.0010 * 0.5                       =  0.0005
-///             net = (1 + 0)(1 - 0.0005) - 1                      = -0.0005
+///             net = (1 - 0.0005)(0.5) - 1                        = -0.50025
 ///
 ///     m4->m5: BBB flat, gross = 0. Half the portfolio is now cash, which
 ///             costs nothing to hold and nothing to close.
 ///             the final exit sells the live half only: 0.0010 * 0.5
 ///             net = (1 + 0)(1 - 0.0005) - 1                      = -0.0005
 ///
-///   total = 1.998 * 0.9995 * 0.9995 - 1 = 1.9960024995 - 1  = 0.9960024995
+///   total = 1.998 * 0.49975 * 0.9995 - 1                    = -0.00199875025
+///
+/// # Why AAA's last print is not its entry price
+///
+/// It was 20, equal to the m3 close AAA is bought at, and that made this test
+/// blind. A blind falsification round marked the delisted holding at `open`
+/// instead of at `last_close_on_or_before` and nothing failed, because the two
+/// were the same `Decimal`. 10 is load-bearing: it is neither the entry price
+/// nor anything else in the fixture, so the middle month separates a mark at
+/// the last close (-0.50025) from a mark at the entry (-0.2505).
 /// ```
 #[test]
 fn e4b_buy_and_hold_pays_to_be_rid_of_a_delisted_name() {
@@ -265,7 +276,7 @@ fn e4b_buy_and_hold_pays_to_be_rid_of_a_delisted_name() {
                 (m[1], dec("10")),
                 (m[2], dec("10")),
                 (m[3], dec("20")),
-                (date(2020, 5, 15), dec("20")),
+                (date(2020, 5, 15), dec("10")),
             ],
         ),
         (
@@ -275,8 +286,8 @@ fn e4b_buy_and_hold_pays_to_be_rid_of_a_delisted_name() {
                 (m[1], dec("10")),
                 (m[2], dec("10")),
                 (m[3], dec("20")),
-                (m[4], dec("20")),
-                (m[5], dec("20")),
+                (m[4], dec("10")),
+                (m[5], dec("10")),
             ],
         ),
     ]);
@@ -291,19 +302,32 @@ fn e4b_buy_and_hold_pays_to_be_rid_of_a_delisted_name() {
         "buy-and-hold must enter holding both names"
     );
 
+    // The fixture's discriminating property. AAA is bought at 20 on m3 and
+    // last prints at 10, so a mark taken from the wrong one of those two
+    // prices changes the answer. An edit that makes them equal again fails
+    // here rather than silently blinding the assertions below.
+    let aaa = &panel.securities()[0];
+    assert_eq!(aaa.close_on(m[3]).expect("bar"), dec("20"));
+    assert_eq!(
+        aaa.last_close_on_or_before(m[4]).expect("bar").1,
+        dec("10"),
+        "the entry price and the last close must differ, or this test cannot \
+         tell a mark at the last close from a mark at the entry"
+    );
+
     let held = baseline::buy_and_hold(&panel, &config, &rebalances).expect("baseline runs");
 
     // The middle month is the whole point. Without the exit charge it is 0,
     // because a delisting moves value to cash and nothing else happens.
     assert_eq!(
         held.net_monthly[1],
-        dec("-0.0005"),
-        "the delisted half left the portfolio without paying the 10 bps it \
-         would have paid to be sold"
+        dec("-0.50025"),
+        "the delisted half left the portfolio at a price that is neither its \
+         last close nor a mark that paid the 10 bps to be sold"
     );
     assert_eq!(
         held.net_monthly,
-        vec![dec("0.998"), dec("-0.0005"), dec("-0.0005")]
+        vec![dec("0.998"), dec("-0.50025"), dec("-0.0005")]
     );
-    assert_eq!(held.total_net_return, dec("0.9960024995"));
+    assert_eq!(held.total_net_return, dec("-0.00199875025"));
 }

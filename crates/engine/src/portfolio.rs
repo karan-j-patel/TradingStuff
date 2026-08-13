@@ -28,7 +28,56 @@ use jiff::civil::Date;
 use rust_decimal::{Decimal, MathematicalOps};
 
 use crate::error::EngineError;
-use crate::panel::Panel;
+use crate::panel::{ExitMark, Panel};
+
+/// How many exits rested on a measurement, on an assumption, and on nothing.
+///
+/// Three counts rather than one, because a report that says only "four names
+/// stopped trading" cannot tell a reader how much of the result is assumed.
+/// `unexplained` is the one that matters most: those holdings still exit at
+/// their last close with no imputation, which is the treatment this round
+/// exists to stop being the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExitCensus {
+    pub imputed: usize,
+    pub observed: usize,
+    pub unexplained: usize,
+}
+
+impl ExitCensus {
+    pub fn total(&self) -> usize {
+        self.imputed + self.observed + self.unexplained
+    }
+
+    /// This census with one more exit in it. Returns a new value rather than
+    /// mutating, so no caller can end up holding a count that moved underneath
+    /// it.
+    fn counting(self, mark: ExitMark) -> Self {
+        match mark {
+            ExitMark::Imputed { .. } => ExitCensus {
+                imputed: self.imputed + 1,
+                ..self
+            },
+            ExitMark::Observed(_) => ExitCensus {
+                observed: self.observed + 1,
+                ..self
+            },
+            ExitMark::Unexplained => ExitCensus {
+                unexplained: self.unexplained + 1,
+                ..self
+            },
+        }
+    }
+
+    /// Two censuses summed, for a loop accumulating over months.
+    pub fn plus(self, other: Self) -> Self {
+        ExitCensus {
+            imputed: self.imputed + other.imputed,
+            observed: self.observed + other.observed,
+            unexplained: self.unexplained + other.unexplained,
+        }
+    }
+}
 
 /// Portfolio weights by security index. Sums to one while invested, empty when
 /// flat.
@@ -77,15 +126,34 @@ pub struct Advance {
     /// last available close instead. These are delistings, or a data gap that
     /// is indistinguishable from one, and both are counted as caveats.
     pub exits: Vec<usize>,
+    /// How those exits were classified by the delistings dataset.
+    pub exit_census: ExitCensus,
 }
 
 /// Hold `weights` from `from` to `to` and report what happened.
 ///
-/// A name with no bar on `to` is marked at its last close on or before `to`,
-/// per the spec: delisted names exit at their last available close with no
-/// delisting-return imputation. Marking it at anything else, in particular at
-/// the price it was bought at, fabricates the very number this run is honest
-/// about not having.
+/// A name with no bar on `to` is marked at its last close on or before `to`.
+/// Marking it at anything else, in particular at the price it was bought at,
+/// fabricates the very number this run is honest about not having.
+///
+/// # What the delistings dataset changes, and what it does not
+///
+/// The trigger is unchanged: an absent bar, and nothing else, decides that a
+/// holding exited. The dataset only *classifies* what the absent bar already
+/// found. A performance-related exit then has the published convention applied
+/// to the terminal mark, and a merger or an unexplained exit keeps the last
+/// close exactly.
+///
+/// The composition with cash is fixed and is the reason this arithmetic is
+/// written as one expression:
+///
+/// ```text
+/// security_return = (close * (1 + delisting_return) + dividend_cash) / open - 1
+/// ```
+///
+/// The haircut applies to the terminal mark alone. Cash that reached the holder
+/// during the month was received and is not clawed back by the company's later
+/// fate, so it is added after the multiplication rather than inside it.
 pub fn advance(
     panel: &Panel,
     weights: &Weights,
@@ -95,6 +163,7 @@ pub fn advance(
     let mut gross_return = Decimal::ZERO;
     let mut returns: Vec<(usize, Decimal)> = Vec::with_capacity(weights.len());
     let mut exits = Vec::new();
+    let mut exit_census = ExitCensus::default();
 
     for (index, weight) in weights {
         let series = panel
@@ -110,10 +179,13 @@ pub fn advance(
             Some(close) => close,
             None => {
                 exits.push(*index);
-                let (_, last) = series
+                let (last_bar, last) = series
                     .last_close_on_or_before(to)
                     .ok_or_else(|| EngineError::math("pricing a delisted holding at exit"))?;
-                last
+                let mark = series.exit_mark_in(last_bar, to);
+                exit_census = exit_census.counting(mark);
+                last.checked_mul(mark.terminal_factor()?)
+                    .ok_or_else(|| EngineError::math("marking a delisted holding at exit"))?
             }
         };
 
@@ -124,7 +196,8 @@ pub fn advance(
         // Cash collected over the month, added to the closing mark. A holding
         // that stopped trading still collects: the fallback close above is the
         // last print, and cash that went ex before it reached the holder just
-        // as it would have on a live name.
+        // as it would have on a live name. Added after the delisting factor
+        // rather than inside it, for the reason stated on this function.
         let cash = series.dividend_cash_in(from, to)?;
         let security_return = close
             .checked_add(cash)
@@ -164,6 +237,7 @@ pub fn advance(
         gross_return,
         drifted,
         exits,
+        exit_census,
     })
 }
 

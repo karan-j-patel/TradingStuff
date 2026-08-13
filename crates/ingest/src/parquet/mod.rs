@@ -48,7 +48,9 @@ mod prices;
 mod tests;
 
 pub use actions::{read_actions, write_actions};
-pub use delistings::{read_delistings, write_delistings};
+pub use delistings::{
+    DelistingProvenance, delistings_provenance, read_delistings, write_delistings,
+};
 pub use error::CurateError;
 pub use marketcap::{
     MarketCapProvenance, UNITS, UNITS_KEY, marketcap_provenance, read_marketcap, write_marketcap,
@@ -339,4 +341,63 @@ pub(crate) fn writer_properties(
 /// Open a curated file for reading, naming it if that fails.
 pub(crate) fn open(path: &Path) -> Result<File, CurateError> {
     File::open(path).map_err(|e| CurateError::io(format!("opening {}", path.display()), e))
+}
+
+/// Read the units and source labels a file declares about itself.
+///
+/// Shared by the two datasets that store a figure in the vendor's own units,
+/// market cap and delistings, so neither can end up checking less than the
+/// other. The units contract is pinned by value and the source is only required
+/// to be present, for the reason spelled out at
+/// [`marketcap::read_marketcap`]: the platform is provider-abstracted, so
+/// another vendor's legitimately curated file has to stay readable, while a
+/// file that cannot say where its rows came from is not provenance at all.
+pub(crate) fn units_and_source(
+    dataset: &'static str,
+    expected_units: &'static str,
+    units_key: &'static str,
+    metadata: Option<&Vec<::parquet::file::metadata::KeyValue>>,
+) -> Result<(String, String), CurateError> {
+    let value = |key: &str| {
+        metadata
+            .into_iter()
+            .flatten()
+            .find(|entry| entry.key == key)
+            .and_then(|entry| entry.value.as_deref())
+    };
+
+    let units = match value(units_key) {
+        Some(found) if found == expected_units => found.to_owned(),
+        Some(other) => {
+            return Err(CurateError::UnexpectedMetadata {
+                dataset,
+                key: units_key,
+                expected: expected_units,
+                found: other.to_owned(),
+            });
+        }
+        None => {
+            return Err(CurateError::MissingMetadata {
+                dataset,
+                key: units_key,
+            });
+        }
+    };
+
+    let source = value(prices::SOURCE_KEY)
+        .ok_or(CurateError::MissingMetadata {
+            dataset,
+            key: prices::SOURCE_KEY,
+        })?
+        .to_owned();
+    if source.trim().is_empty() {
+        return Err(CurateError::UnexpectedMetadata {
+            dataset,
+            key: prices::SOURCE_KEY,
+            expected: "a non-empty source",
+            found: source,
+        });
+    }
+
+    Ok((units, source))
 }

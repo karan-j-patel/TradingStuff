@@ -85,6 +85,21 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
             actions_sha256: Some("1".repeat(64)),
             ..base.clone()
         },
+        // Imputing delisting returns changes what an exit is worth, so the run
+        // that imputes and the run that does not are two hypotheses about what
+        // a delisting cost a holder rather than one measured twice.
+        BacktestConfig {
+            delisting_convention: Some(crate::config::DELISTING_CONVENTION.to_string()),
+            ..base.clone()
+        },
+        // Which securities the convention reached is a property of the file,
+        // not of the rule. A refetch that explains one more name produces a
+        // different return series under the identical convention, so the file
+        // has to reach the hash on its own or the two runs record as one trial.
+        BacktestConfig {
+            delistings_sha256: Some("1".repeat(64)),
+            ..base.clone()
+        },
     ];
 
     // One mutation per field. If the struct grows a field, this count is the
@@ -187,4 +202,14 @@ fn the_canonical_form_is_sorted_and_compact() {
         "got {canonical}"
     );
     assert!(!canonical.contains(' '), "got {canonical}");
+
+    // The two delisting keys land adjacent, and in an order that reads
+    // backwards at a glance: the sort is over bytes, and `_` is 0x5F against
+    // `s` at 0x73, so `delisting_convention` precedes `delistings_sha256`.
+    // Pinned because a rename that swapped them would move every recorded hash
+    // while changing nothing anyone meant to change.
+    assert!(
+        canonical.contains(r#""delisting_convention":null,"delistings_sha256":null"#),
+        "got {canonical}"
+    );
 }

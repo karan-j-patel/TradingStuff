@@ -73,7 +73,6 @@ pub fn print_outcome(
 }
 
 fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option<Decimal>) {
-    let strategy = &report.strategy;
     // The research program rather than a hard-coded strategy name. There is
     // more than one strategy now, and a heading that named the wrong one would
     // mislabel every figure under it.
@@ -106,7 +105,7 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
         "  mean one-way turnover:   {}   per rebalance",
         show(report.mean_one_way_turnover)
     );
-    println!("  delisting exits:         {}", strategy.delisting_exits);
+    println!("{}", exit_block(report));
     println!();
 
     println!("{}", dsr_block(log, program, report));
@@ -143,14 +142,58 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
     println!();
 }
 
+/// What the report says about held names that stopped trading.
+///
+/// Two shapes, selected on whether a delistings file was attached, because the
+/// three-state split is vocabulary the dataset supplies. On a run with no such
+/// file every exit lands in `unexplained` by construction, and printing that
+/// word claims a dataset looked and found nothing when no dataset was consulted
+/// at all. The bare run therefore keeps the single line it printed before this
+/// round existed.
+///
+/// Only the printing is gated. The census is still accumulated on every run,
+/// because the pre-round engine counted and printed delisting exits
+/// unconditionally and X-D4 is what holds that arithmetic byte-identical.
+///
+/// Returned as text rather than printed, so a test can assert on both shapes
+/// without capturing stdout, which is the same reason [`dsr_block`] and
+/// [`caveat_block`] exist.
+pub(super) fn exit_block(report: &Report) -> String {
+    let strategy = &report.strategy;
+    let total = format!("  delisting exits:         {}", strategy.delisting_exits);
+    if !report.delistings_imputed {
+        return total;
+    }
+    // The three states printed apart, because the total says how many holdings
+    // stopped trading and only the split says how much of the figure above
+    // rests on a published convention rather than on data. The unexplained
+    // count is the one the caveat block points a reader at.
+    [
+        total,
+        format!(
+            "    imputed at the convention:   {}",
+            strategy.exits.imputed
+        ),
+        format!(
+            "    observed from data:          {}",
+            strategy.exits.observed
+        ),
+        format!(
+            "    unexplained, at last close:  {}",
+            strategy.exits.unexplained
+        ),
+    ]
+    .join("\n")
+}
+
 /// The caveat block this report is published under.
 ///
 /// A named function rather than the call inlined above, so the selection can be
-/// asserted without capturing stdout. The two blocks make different claims
-/// about which way the remaining bias runs, and a printer that ignored the flag
+/// asserted without capturing stdout. The blocks make different claims about
+/// which way the remaining bias runs, and a printer that ignored either flag
 /// would attach the wrong claim to a real figure.
 pub(super) fn caveat_block(report: &Report) -> &'static str {
-    engine::caveats(report.dividends_applied)
+    engine::caveats(report.dividends_applied, report.delistings_imputed)
 }
 
 /// What `N` is, and is not, printed beside every DSR figure.

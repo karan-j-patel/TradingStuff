@@ -35,18 +35,21 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use clap::Subcommand;
 use ingest::parquet::{
-    actions_path, delistings_path, marketcap_path, prices_path, write_actions, write_delistings,
-    write_marketcap, write_prices,
+    actions_path, delistings_path, marketcap_path, prices_path, write_actions, write_marketcap,
+    write_prices,
 };
 use ingest::provider::{AdjustedPriceSource, DateRange, SourceError};
 use ingest::sharadar::SharadarClient;
 use ingest::universe::{self, FetchOutcome};
 use ingest::{
-    ActionRecord, AdjustedBar, AssetKey, Delisting, MarketCapRecord, validate_action,
-    validate_adjusted, validate_delisting, validate_marketcap,
+    ActionRecord, AdjustedBar, AssetKey, MarketCapRecord, validate_action, validate_adjusted,
+    validate_marketcap,
 };
 use jiff::civil::Date;
 use serde::de::DeserializeOwned;
+
+/// The delistings dataset, which has a market-wide fetch of its own.
+mod delistings;
 
 /// How many rejected records to name before the message stops being useful.
 const REPORTED_REJECTS: usize = 5;
@@ -83,11 +86,28 @@ pub enum Dataset {
         data_root: Option<String>,
     },
 
-    /// Curate delistings from a JSONL file of Delisting records
+    /// Curate delistings, from a JSONL file or straight from the provider
     Delistings {
         /// JSONL file to read, one Delisting per line
         #[arg(long)]
-        input: String,
+        input: Option<String>,
+        /// Fetch from the configured provider instead of reading a file
+        #[arg(long)]
+        fetch: bool,
+        /// Universe file to fetch against, as written by `ingest fetch-universe`.
+        ///
+        /// The walk is market-wide, one request per exit kind, and the file is
+        /// what turns a vendor ticker into a record carrying the vendor's
+        /// permanent identifier. Rows naming anything outside it are discarded
+        /// during curation and never stored
+        #[arg(long)]
+        universe: Option<String>,
+        /// First date to fetch, inclusive. Only with --fetch
+        #[arg(long)]
+        from: Option<Date>,
+        /// Last date to fetch, inclusive. Only with --fetch
+        #[arg(long)]
+        to: Option<Date>,
         #[arg(long, help = DATA_ROOT_HELP)]
         data_root: Option<String>,
     },
@@ -178,9 +198,23 @@ pub fn run(dataset: &Dataset) -> anyhow::Result<ExitCode> {
             };
             curate_prices(bars, &path, &source)
         }
-        Dataset::Delistings { input, data_root } => {
+        Dataset::Delistings {
+            input,
+            fetch,
+            universe,
+            from,
+            to,
+            data_root,
+        } => {
             let root = ingest::parquet::data_root(data_root.as_deref());
-            curate_delistings(input, &delistings_path(&root))
+            delistings::run(
+                input.as_deref(),
+                *fetch,
+                universe.as_deref(),
+                *from,
+                *to,
+                &delistings_path(&root),
+            )
         }
         Dataset::Actions {
             input,
@@ -642,32 +676,6 @@ fn curate_prices(bars: Vec<AdjustedBar>, path: &Path, source: &str) -> anyhow::R
     println!("  rejected: 0");
     println!("  written:  {}", path.display());
     println!("  source:   {source}");
-    Ok(ExitCode::SUCCESS)
-}
-
-fn curate_delistings(input: &str, path: &Path) -> anyhow::Result<ExitCode> {
-    let rows: Vec<Delisting> = read_jsonl(input)?;
-    let total = rows.len();
-
-    // Same refusal behaviour as prices. Rejected records fail the command
-    // before anything is written rather than being dropped.
-    let rejected: Vec<(&Delisting, _)> = rows
-        .iter()
-        .filter_map(|row| validate_delisting(row).err().map(|reason| (row, reason)))
-        .collect();
-    if !rejected.is_empty() {
-        return Err(refuse(total, total - rejected.len(), &rejected, |row| {
-            format!("{} {}", row.asset.ticker, row.date)
-        }));
-    }
-
-    let written =
-        write_delistings(rows, path).with_context(|| format!("writing {}", path.display()))?;
-
-    println!("Curated {written} delistings from {total} records.");
-    println!("  accepted: {written}");
-    println!("  rejected: 0");
-    println!("  written:  {}", path.display());
     Ok(ExitCode::SUCCESS)
 }
 

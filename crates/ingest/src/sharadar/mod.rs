@@ -71,6 +71,7 @@ use std::time::Duration;
 
 mod client;
 mod decode;
+pub mod exits;
 mod http;
 pub mod native;
 mod sep;
@@ -159,6 +160,12 @@ pub(crate) mod columns {
 /// answered with an empty result rather than an error, so every spelling of a
 /// table name in this codebase comes from [`columns::native_tables`].
 pub const NATIVE_STOCKS_TABLE: &str = columns::native_tables::STOCKS;
+
+/// The native corporate actions table, for the same reason.
+pub const NATIVE_ACTIONS_TABLE: &str = columns::native_tables::ACTIONS;
+
+/// The native daily metrics table, for the same reason.
+pub const NATIVE_DAILY_TABLE: &str = columns::native_tables::DAILY;
 
 /// The name this connector reports in errors and in stored provenance.
 pub const PROVIDER: &str = "Sharadar";

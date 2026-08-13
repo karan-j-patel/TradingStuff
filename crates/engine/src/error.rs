@@ -70,6 +70,19 @@ pub enum EngineError {
     },
 
     #[error(
+        "the configuration names a delisting convention ({config_has_convention}) and a \
+         delistings file hash ({config_has_hash}) while the panel carries attached delistings \
+         ({panel_has_delistings}), and all three must agree. Otherwise the run either reports a \
+         delisting treatment it did not apply, or applies one under a hash that does not record \
+         which file it came from"
+    )]
+    DelistingWiringMismatch {
+        config_has_convention: bool,
+        config_has_hash: bool,
+        panel_has_delistings: bool,
+    },
+
+    #[error(
         "the liquidity floor fraction {fraction} is outside [0, 1), and a screen that \
          removes every eligible name or a negative number of them is a configuration \
          mistake rather than a screen"

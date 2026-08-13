@@ -372,8 +372,10 @@ fn a_non_positive_dividend_amount_is_refused() {
 /// when it is known and it is UP.
 #[test]
 fn e8h_the_caveat_block_follows_the_dividend_flag() {
-    let without = run::caveats(false);
-    let with = run::caveats(true);
+    // The delisting axis is held off in both, so this test still measures only
+    // what the dividend flag changes. E11h is the other axis.
+    let without = run::caveats(false, false);
+    let with = run::caveats(true, false);
 
     assert!(
         without.contains("DOWN") && without.contains("UP"),

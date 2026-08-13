@@ -305,11 +305,31 @@ fn write_with_metadata(path: &Path, metadata: &[(&str, &str)]) {
 /// routinely. The write fails instead, and the message names what was refused
 /// so the operator can see which name and date to look at.
 #[test]
-fn m4_a_non_positive_figure_fails_the_write_and_names_it() {
+fn m4_a_zero_figure_is_a_real_sub_quantum_value_and_round_trips() {
+    // Learned in production on the first full-universe walk, 2026-08-12:
+    // 4387 of 2186126 rows carried marketcap 0, all on distressed names
+    // (DMCSQ and kin, 2001-2002). The vendor quantises to one decimal of a
+    // million, so a sub-$50k market cap legitimately rounds to 0.0 on a row
+    // the vendor deliberately shipped. Zero is a value below the quantum,
+    // not corruption; negative remains corruption.
+    let path = scratch("m4-zero").join("marketcap.parquet");
+    let rows = vec![
+        cap(sharadar("GOOD", 1), day(2024, 12, 30), dec("1234567.8")),
+        cap(sharadar("DUST", 2), day(2024, 12, 31), dec("0")),
+    ];
+    let written = write_marketcap(rows, &path, "synthetic").expect("a zero figure writes");
+    assert_eq!(written, 2);
+
+    let back = read_marketcap(&path).expect("reads back");
+    assert_eq!(back[1].marketcap, dec("0"));
+}
+
+#[test]
+fn m4_a_negative_figure_fails_the_write_and_names_it() {
     let directory = scratch("m4");
     let path = directory.join("marketcap.parquet");
 
-    for bad in ["0", "-1234.5"] {
+    for bad in ["-0.1", "-1234.5"] {
         let rows = vec![
             cap(sharadar("GOOD", 1), day(2024, 12, 30), dec("1234567.8")),
             cap(sharadar("BAD", 2), day(2024, 12, 31), dec(bad)),

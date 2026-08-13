@@ -17,13 +17,16 @@
 
 mod accounting;
 mod baselines;
+mod delistings;
 mod dividends;
 mod eligibility;
 mod hashing;
 mod lowvol;
 mod screens;
 
-use ingest::actions::{ActionRecord, CorporateAction, DividendKind};
+use ingest::actions::{
+    ActionRecord, CorporateAction, Delisting, DelistingReason, DividendKind, Listing, TerminalValue,
+};
 use ingest::adjusted::AdjustedBar;
 use ingest::schema::{AssetKey, CloseKind, PermanentId, SessionScope};
 use jiff::civil::{Date, date};
@@ -194,6 +197,39 @@ pub fn with_cash_dividends(panel: Panel, dividends: &[(AssetKey, Date, Decimal)]
     panel
         .with_dividends(&records)
         .expect("fixture dividends attach")
+}
+
+/// One synthetic delisting record, in the shape curation produces.
+///
+/// `terminal` is [`TerminalValue::Unknown`] because this vendor publishes no
+/// delisting return on any row, so the engine is the thing that imputes. A
+/// fixture that arrived pre-imputed would be testing the fixture.
+///
+/// `listing` is [`Listing::Other`] for the same reason curation stores it: the
+/// actions row carries no exchange, and the engine's convention does not
+/// consult one.
+pub fn delisting(asset: AssetKey, date: Date, reason: DelistingReason) -> Delisting {
+    Delisting {
+        asset,
+        date,
+        reason,
+        listing: Listing::Other,
+        terminal: TerminalValue::Unknown,
+        final_market_cap: None,
+        source: "synthetic".to_string(),
+    }
+}
+
+/// Attach delistings to a panel a fixture already built.
+///
+/// A separate step rather than a wider `panel_of`, on the rule
+/// [`with_cash_dividends`] follows. Every existing fixture keeps its signature,
+/// so a test that says nothing about delistings is demonstrably running the
+/// path that has none.
+pub fn with_delistings(panel: Panel, delistings: &[Delisting]) -> Panel {
+    panel
+        .with_delistings(delistings)
+        .expect("fixture delistings attach")
 }
 
 /// Two securities over the six month-ends.

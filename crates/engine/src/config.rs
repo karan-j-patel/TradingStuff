@@ -39,6 +39,20 @@ pub const VARIANT_PRICE_FLOOR_10: &str = "price-floor-10";
 /// The variant of [`LOWVOL_PROGRAM`] that drops the least liquid names.
 pub const VARIANT_LIQUIDITY_SCREENED: &str = "liquidity-screened";
 
+/// The name recorded in [`BacktestConfig::delisting_convention`] when a run
+/// imputes delisting returns.
+///
+/// One string rather than a per-reason set, because the rule is flat. A
+/// performance-related exit takes Shumway (1997)'s -30 percent whatever the
+/// venue, following Jensen, Kelly and Pedersen (2023) for a dataset that
+/// publishes no delisting returns, and a merger takes zero. See
+/// `ingest::flat_convention_for` for why the venue is not consulted.
+///
+/// A future round that changes the figure changes this string, which moves
+/// every config hash under it. That is the point: a run at -30 and a run at
+/// -100 are two hypotheses about what a delisting cost, not one measured twice.
+pub const DELISTING_CONVENTION: &str = "shumway_1997_flat";
+
 /// Every `(program, variant)` pair this engine has a configuration for.
 ///
 /// # Why a registry rather than only a `match`
@@ -183,6 +197,53 @@ pub struct BacktestConfig {
     /// over-counting trials when a refetch changes a byte without changing what
     /// the run sees, which is the safe way round.
     pub actions_sha256: Option<String>,
+
+    /// The published convention delisting returns were imputed under, when a
+    /// delistings file was supplied.
+    ///
+    /// `None` is the behaviour from before this existed. Every exit takes its
+    /// last close with no imputation, which is the treatment the pre-delisting
+    /// caveat block calls an upward bias.
+    ///
+    /// # Why this is the rule and not the data
+    ///
+    /// The convention is what changes the arithmetic. Two runs over the same
+    /// prices, one imputing at -30 percent and one not, are two hypotheses
+    /// about what a delisting cost a holder. Which securities that rule reached
+    /// is a separate question and [`BacktestConfig::delistings_sha256`] carries
+    /// it, because both have to be in the hash for a recorded trial to be
+    /// reproducible.
+    ///
+    /// Adding this field moves every previously recorded hash, `None` or not,
+    /// because the canonical form gains a key. That is inherent to hashing the
+    /// whole struct and is accepted, as it was when `strategy` and
+    /// `liquidity_floor_fraction` were added.
+    pub delisting_convention: Option<String>,
+
+    /// SHA-256 of the delistings file, when one was supplied.
+    ///
+    /// Same rules as [`BacktestConfig::actions_sha256`], and it exists for the
+    /// same reason. `None` means no delistings file, so every exit took its
+    /// last close.
+    ///
+    /// # Why the convention alone is not enough
+    ///
+    /// The convention says how a classified exit is marked. It says nothing
+    /// about which exits got classified, and that is a property of the file. A
+    /// refetch that explains one more name produces a different set of imputed
+    /// exits and therefore a different return series under the identical rule.
+    /// Without this field those two runs record as one trial and the second
+    /// result is not reproducible from what the log holds.
+    ///
+    /// The unexplained count printed beside a result makes the difference
+    /// visible to a reader. Visibility is not identity, and the trial log needs
+    /// identity.
+    ///
+    /// Hashed over the file's bytes, so refetching a delistings file that has
+    /// not changed produces the same hash. The failure direction that leaves is
+    /// over-counting trials when a refetch changes a byte without changing what
+    /// the run sees, which is the safe way round.
+    pub delistings_sha256: Option<String>,
 }
 
 impl BacktestConfig {
@@ -257,6 +318,8 @@ impl BacktestConfig {
             sample_residue: ingest::universe::SAMPLE_RESIDUE,
             universe_sha256: universe_sha256.into(),
             actions_sha256: None,
+            delisting_convention: None,
+            delistings_sha256: None,
         }
     }
 

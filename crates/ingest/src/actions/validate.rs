@@ -148,6 +148,7 @@ mod tests {
             reason: DelistingReason::Bankruptcy,
             listing: Listing::Nasdaq,
             terminal: TerminalValue::Observed(dec(-0.92)),
+            final_market_cap: None,
             source: "synthetic".into(),
         }
     }

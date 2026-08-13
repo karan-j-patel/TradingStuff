@@ -16,6 +16,8 @@ use super::codec::{
 use super::enums::{
     convention_from, convention_str, listing_from, listing_str, reason_from, reason_str,
 };
+use super::marketcap::{UNITS, UNITS_KEY};
+use super::prices::SOURCE_KEY;
 use crate::actions::{Delisting, TerminalValue, validate_delisting};
 
 pub(crate) const DATASET: &str = "delistings";
@@ -23,6 +25,16 @@ pub(crate) const DATASET: &str = "delistings";
 const OBSERVED: &str = "observed";
 const IMPUTED: &str = "imputed";
 const UNKNOWN: &str = "unknown";
+
+/// What a delistings file says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelistingProvenance {
+    /// Units of `final_market_cap`. Always [`UNITS`] for a file this reader
+    /// accepts.
+    pub units: String,
+    /// The data vendor the rows came from.
+    pub source: String,
+}
 
 /// The column layout, which is also what the reader checks a file against.
 ///
@@ -45,12 +57,27 @@ pub(crate) fn schema() -> Arc<Schema> {
             true,
         ),
         Field::new("imputation_convention", DataType::Utf8, true),
+        // Nullable, and null means the source row carried no figure rather
+        // than a figure of zero. Zero is a real final market capitalisation on
+        // a bankruptcy liquidation, so the two states cannot share an encoding.
+        // The units live in the file's key-value metadata, as they do on the
+        // market cap dataset, because the two candidate readings of this
+        // column differ by a factor of a million.
+        Field::new(
+            "final_market_cap",
+            DataType::Decimal128(DECIMAL_PRECISION, DECIMAL_SCALE),
+            true,
+        ),
         Field::new("source", DataType::Utf8, false),
     ]))
 }
 
 /// Write delistings to `path`, returning how many rows landed.
-pub fn write_delistings(rows: Vec<Delisting>, path: &Path) -> Result<usize, CurateError> {
+pub fn write_delistings(
+    rows: Vec<Delisting>,
+    path: &Path,
+    source: &str,
+) -> Result<usize, CurateError> {
     // Same reasoning as `write_prices`. The writer is the guard, because it is
     // the one thing every caller has to go through.
     let total = rows.len();
@@ -78,7 +105,8 @@ pub fn write_delistings(rows: Vec<Delisting>, path: &Path) -> Result<usize, Cura
     let mut terminal_kind = Vec::with_capacity(count);
     let mut terminal_value = Vec::with_capacity(count);
     let mut convention = Vec::with_capacity(count);
-    let mut source = Vec::with_capacity(count);
+    let mut final_market_cap = Vec::with_capacity(count);
+    let mut row_source = Vec::with_capacity(count);
 
     for (identity, row) in &rows {
         let (state, value, assumed) = encode_terminal(&row.terminal)?;
@@ -91,7 +119,16 @@ pub fn write_delistings(rows: Vec<Delisting>, path: &Path) -> Result<usize, Cura
         terminal_kind.push(state);
         terminal_value.push(value);
         convention.push(assumed);
-        source.push(row.source.as_str());
+        // `transpose` turns the `Option` inside out: a row with no figure
+        // stays `None`, and a row with one carries the encoding error out. A
+        // figure of zero encodes as `Some(0)` and is written as a value, not
+        // as a null.
+        final_market_cap.push(
+            row.final_market_cap
+                .map(|value| decimal_to_i128(DATASET, "final_market_cap", value))
+                .transpose()?,
+        );
+        row_source.push(row.source.as_str());
     }
 
     let batch = RecordBatch::try_new(
@@ -109,7 +146,11 @@ pub fn write_delistings(rows: Vec<Delisting>, path: &Path) -> Result<usize, Cura
                     .with_precision_and_scale(DECIMAL_PRECISION, DECIMAL_SCALE)?,
             ),
             Arc::new(StringArray::from(convention)),
-            Arc::new(StringArray::from(source)),
+            Arc::new(
+                Decimal128Array::from(final_market_cap)
+                    .with_precision_and_scale(DECIMAL_PRECISION, DECIMAL_SCALE)?,
+            ),
+            Arc::new(StringArray::from(row_source)),
         ],
     )?;
 
@@ -117,7 +158,10 @@ pub fn write_delistings(rows: Vec<Delisting>, path: &Path) -> Result<usize, Cura
         let mut writer = ::parquet::arrow::ArrowWriter::try_new(
             file,
             schema(),
-            Some(super::writer_properties(&[])),
+            Some(super::writer_properties(&[
+                (UNITS_KEY, UNITS),
+                (SOURCE_KEY, source),
+            ])),
         )?;
         writer.write(&batch)?;
         writer.close()?;
@@ -203,11 +247,35 @@ fn decode_terminal(
     }
 }
 
+/// What a curated delistings file declares about itself.
+pub fn delistings_provenance(path: &Path) -> Result<DelistingProvenance, CurateError> {
+    let file = super::open(path)?;
+    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let (units, source) = super::units_and_source(
+        DATASET,
+        UNITS,
+        UNITS_KEY,
+        builder.metadata().file_metadata().key_value_metadata(),
+    )?;
+    Ok(DelistingProvenance { units, source })
+}
+
 /// Read every delisting back, in the order the file holds them.
+///
+/// The units metadata is checked before a single row is decoded, on the same
+/// rule the market cap reader applies. `final_market_cap` is a vendor figure in
+/// millions, and a file that does not say so is a file whose column cannot be
+/// used by anything except this crate.
 pub fn read_delistings(path: &Path) -> Result<Vec<Delisting>, CurateError> {
     let file = super::open(path)?;
-    let reader =
-        ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+    super::units_and_source(
+        DATASET,
+        UNITS,
+        UNITS_KEY,
+        builder.metadata().file_metadata().key_value_metadata(),
+    )?;
+    let reader = builder.build()?;
 
     let mut delistings = Vec::new();
     let mut offset = 0usize;
@@ -223,6 +291,7 @@ pub fn read_delistings(path: &Path) -> Result<Vec<Delisting>, CurateError> {
         let terminal_kind = string_column(&batch, DATASET, "terminal_kind")?;
         let terminal_value = decimal_column(&batch, DATASET, "terminal_value")?;
         let convention = string_column(&batch, DATASET, "imputation_convention")?;
+        let final_market_cap = decimal_column(&batch, DATASET, "final_market_cap")?;
         let source = string_column(&batch, DATASET, "source")?;
 
         for row in 0..batch.num_rows() {
@@ -243,6 +312,12 @@ pub fn read_delistings(path: &Path) -> Result<Vec<Delisting>, CurateError> {
                     required_str(terminal_kind, DATASET, "terminal_kind", row)?,
                     optional_decimal(terminal_value, DATASET, "terminal_value", row)?,
                     optional_str(convention, row),
+                )?,
+                final_market_cap: optional_decimal(
+                    final_market_cap,
+                    DATASET,
+                    "final_market_cap",
+                    row,
                 )?,
                 source: required_str(source, DATASET, "source", row)?.to_owned(),
             });
