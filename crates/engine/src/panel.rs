@@ -752,6 +752,55 @@ impl Panel {
         })
     }
 
+    /// A new panel holding only the securities `keep` accepts.
+    ///
+    /// # Why the calendar is the parent's, not the survivors'
+    ///
+    /// The trading days and month-ends are carried over unchanged rather than
+    /// recomputed from what is left. Two reasons, both load-bearing for the
+    /// turnover diagnostic this exists for.
+    ///
+    /// Formation dates have to be the same across every sub-universe, or the
+    /// replays are on different calendars and their turnover figures are not
+    /// comparable with each other. And `trading_days_in` is the denominator of
+    /// the coverage rule, so a thinner sub-universe would set itself a lower bar
+    /// to clear and admit names the full universe rejected.
+    ///
+    /// Returns a new panel rather than mutating, so no caller ends up holding
+    /// one whose membership moved underneath it. The attachment digests travel
+    /// unchanged: the same files were read, and which securities they reached is
+    /// a separate question from which file they were.
+    ///
+    /// The unmatched-record counts also travel unchanged. They describe the
+    /// attachment that happened, which is still true of the parent, and
+    /// recomputing them here would claim a second attachment took place.
+    ///
+    /// # Why this is crate-private
+    ///
+    /// Those travelling digests are exactly right for the turnover diagnostic
+    /// and exactly wrong everywhere else. A filtered panel handed to a counted
+    /// backtest would pass the digest wiring guards while holding a different
+    /// universe from the one the recorded hashes describe, which is a
+    /// mislabelled trial. Keeping the constructor inside the crate means no
+    /// external caller can reach that state by accident:
+    ///
+    /// ```compile_fail
+    /// fn cannot_filter_from_outside(panel: engine::Panel) -> engine::Panel {
+    ///     panel.retaining(|_| true)
+    /// }
+    /// ```
+    pub(crate) fn retaining(&self, keep: impl Fn(&AssetKey) -> bool) -> Panel {
+        Panel {
+            securities: self
+                .securities
+                .iter()
+                .filter(|series| keep(&series.asset))
+                .cloned()
+                .collect(),
+            ..self.clone()
+        }
+    }
+
     pub fn securities(&self) -> &[Series] {
         &self.securities
     }

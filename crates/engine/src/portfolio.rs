@@ -338,6 +338,29 @@ pub fn advance(
     })
 }
 
+/// Mean one-way turnover per formation, single-counted.
+///
+/// `traded` holds the two-way notional moved at each formation, so a complete
+/// rotation is 2.0 there and reads as 1.0 here. That is the convention a source
+/// paper's own turnover figure is quoted in, which is the only reason to halve
+/// it at all.
+///
+/// One body rather than one per caller. The backtest report and the turnover
+/// diagnostic both quote this number and a divisor that drifted between two
+/// copies would make the diagnostic disagree with the run it is describing,
+/// which is the one thing it exists not to do.
+pub fn mean_one_way_turnover(traded: &[Decimal]) -> Result<Decimal, EngineError> {
+    if traded.is_empty() {
+        return Err(EngineError::math("averaging turnover over no formations"));
+    }
+    traded
+        .iter()
+        .try_fold(Decimal::ZERO, |running, value| running.checked_add(*value))
+        .and_then(|total| total.checked_div(Decimal::from(traded.len())))
+        .and_then(|two_way| two_way.checked_div(Decimal::from(2u64)))
+        .ok_or_else(|| EngineError::math("averaging turnover"))
+}
+
 /// Apply a cost to a return, both expressed as fractions.
 ///
 /// `(1 - cost) * (1 + gross) - 1`, which is what a portfolio that pays the cost

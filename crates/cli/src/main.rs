@@ -19,6 +19,7 @@ use clap::{Parser, Subcommand};
 
 mod backtest;
 mod curate;
+mod diagnose;
 mod gates;
 mod ingest;
 mod status;
@@ -111,6 +112,15 @@ enum Command {
         action: Option<ingest::Action>,
     },
 
+    /// Measure the machinery without producing a result
+    ///
+    /// Nothing here is a backtest. These tools compute no return series and no
+    /// Sharpe, and record no trial.
+    Diagnose {
+        #[command(subcommand)]
+        what: diagnose::What,
+    },
+
     /// Write validated records to a curated Parquet file
     ///
     /// Curation is not a backtest, so nothing here touches the trial counter.
@@ -146,6 +156,7 @@ fn main() -> ExitCode {
         )
         .and_then(|strategy| backtest::run(&trials, &program, variant.as_deref(), &strategy)),
         Command::Ingest { action } => ingest::run(action.as_ref()),
+        Command::Diagnose { what } => diagnose::run(&what),
         Command::Curate { dataset } => curate::run(&dataset),
     };
 

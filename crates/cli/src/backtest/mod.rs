@@ -152,14 +152,14 @@ impl<'a> Strategy<'a> {
 /// close, and it applied to all three attachments equally.
 ///
 /// So the file is read once here and both consumers are served from the buffer.
-struct Attachment {
-    sha256: String,
-    bytes: Bytes,
+pub(crate) struct Attachment {
+    pub(crate) sha256: String,
+    pub(crate) bytes: Bytes,
 }
 
 impl Attachment {
     /// Read `path` once, keeping the bytes and their digest together.
-    fn read(path: &Path, dataset: &str) -> anyhow::Result<Self> {
+    pub(crate) fn read(path: &Path, dataset: &str) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading the {dataset} file {}", path.display()))?;
         // Hashed over the bytes on disk, so the recorded value is what `shasum`
@@ -179,14 +179,14 @@ impl Attachment {
 /// read-once rule is stated in one place and a fourth dataset joins without
 /// growing every signature between here and the panel.
 #[derive(Default)]
-struct Attachments {
-    actions: Option<Attachment>,
-    delistings: Option<Attachment>,
-    marketcap: Option<Attachment>,
+pub(crate) struct Attachments {
+    pub(crate) actions: Option<Attachment>,
+    pub(crate) delistings: Option<Attachment>,
+    pub(crate) marketcap: Option<Attachment>,
 }
 
 impl Attachments {
-    fn read(
+    pub(crate) fn read(
         actions: Option<&Path>,
         delistings: Option<&Path>,
         marketcap: Option<&Path>,
@@ -365,7 +365,7 @@ fn engine_run(
 /// rule over a refetched file that classifies one more name are the same
 /// hypothesis measured against slightly more data. The unexplained-exit count
 /// printed beside the result is what makes that difference visible.
-fn resolve(
+pub(crate) fn resolve(
     program: &str,
     variant: Option<&str>,
     universe: &Path,
@@ -419,12 +419,11 @@ fn resolve(
     ))
 }
 
-fn execute(
+pub(crate) fn build_panel(
     prices: &Path,
     attachments: Attachments,
     members: &HashSet<AssetKey>,
-    config: &BacktestConfig,
-) -> anyhow::Result<Report> {
+) -> anyhow::Result<Panel> {
     let bars = ingest::parquet::read_prices(prices)
         .with_context(|| format!("reading curated prices from {}", prices.display()))?;
 
@@ -530,5 +529,17 @@ fn execute(
         }
     };
 
-    Ok(engine::backtest(&panel, config)?)
+    Ok(panel)
+}
+
+fn execute(
+    prices: &Path,
+    attachments: Attachments,
+    members: &HashSet<AssetKey>,
+    config: &BacktestConfig,
+) -> anyhow::Result<Report> {
+    Ok(engine::backtest(
+        &build_panel(prices, attachments, members)?,
+        config,
+    )?)
 }

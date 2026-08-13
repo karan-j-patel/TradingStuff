@@ -396,10 +396,14 @@ fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineErro
     Ok(())
 }
 
-/// Run the configured strategy and both baselines over a panel.
-pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, EngineError> {
-    check_wiring(panel, config)?;
-
+/// The formation dates a configuration implies over a panel, each already
+/// resolved into the names it would hold.
+///
+/// Extracted from [`backtest`] so the turnover diagnostic replays the identical
+/// schedule rather than a second copy of this arithmetic. A stride, a lead-in or
+/// a collapse rule that drifted between two copies would make the diagnostic
+/// describe a run nobody could reproduce.
+pub fn schedule(panel: &Panel, config: &BacktestConfig) -> Result<Vec<Rebalance>, EngineError> {
     // Refused rather than clamped to one. A schedule that forms a portfolio
     // every zero months is a configuration mistake, and the loop below would
     // never advance past its first formation.
@@ -437,6 +441,14 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
             rebalances: rebalances.len(),
         });
     }
+    Ok(rebalances)
+}
+
+/// Run the configured strategy and both baselines over a panel.
+pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, EngineError> {
+    check_wiring(panel, config)?;
+
+    let rebalances = schedule(panel, config)?;
 
     let strategy = run_schedule(panel, config, &rebalances, |_, rebalance| {
         rebalance.chosen.clone()
@@ -452,15 +464,7 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
         .checked_mul(portfolio::annualisation_factor()?)
         .ok_or_else(|| EngineError::math("annualising the strategy Sharpe"))?;
 
-    let traded_total = strategy
-        .traded
-        .iter()
-        .try_fold(Decimal::ZERO, |running, value| running.checked_add(*value))
-        .ok_or_else(|| EngineError::math("summing traded notional"))?;
-    let mean_one_way_turnover = traded_total
-        .checked_div(Decimal::from(strategy.traded.len()))
-        .and_then(|two_way| two_way.checked_div(Decimal::from(2u64)))
-        .ok_or_else(|| EngineError::math("averaging turnover"))?;
+    let mean_one_way_turnover = portfolio::mean_one_way_turnover(&strategy.traded)?;
 
     let buy_and_hold = baseline::buy_and_hold(panel, config, &rebalances, config.weighting)?;
     let equal_weighted_buy_and_hold = match config.weighting {

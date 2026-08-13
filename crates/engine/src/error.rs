@@ -26,6 +26,12 @@ pub enum EngineError {
     EligibilityCollapse { rebalances: usize },
 
     #[error(
+        "security {ticker} carries no vendor permanent identifier, so it belongs to no \
+         sub-universe and the splits would not be exhaustive"
+    )]
+    SubUniverseUnplaceable { ticker: String },
+
+    #[error(
         "fewer than two monthly observations ({months}), so no Sharpe exists; a single \
          return has no dispersion to divide by"
     )]
@@ -170,6 +176,13 @@ pub enum EngineError {
          holdable"
     )]
     UnweightableHolding { security: usize, date: Date },
+
+    #[error(
+        "the turnover fit has {points} point(s) at a single distinct book size, so the line \
+         through them is undetermined. A slope invented here would be the most flattering \
+         number this diagnostic could emit, so it is refused instead"
+    )]
+    TurnoverFitUnderdetermined { points: usize },
 
     #[error("encoding the configuration for hashing failed")]
     ConfigEncode(#[source] serde_json::Error),

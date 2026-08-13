@@ -36,6 +36,8 @@
 //! - [`portfolio`] turns weights and prices into returns, with costs.
 //! - [`baseline`] runs the comparisons rule 5 requires.
 //! - [`run`] is the monthly loop and the report it produces.
+//! - [`turnover`] replays formations only, for the book-size diagnostic. It
+//!   computes no return and records no trial.
 
 pub mod baseline;
 pub mod config;
@@ -47,6 +49,7 @@ pub mod momentum;
 pub mod panel;
 pub mod portfolio;
 pub mod run;
+pub mod turnover;
 
 #[cfg(test)]
 mod tests;
@@ -64,3 +67,4 @@ pub use run::{
     CAVEATS, CAVEATS_WITH_DELISTINGS, CAVEATS_WITH_DIVIDENDS,
     CAVEATS_WITH_DIVIDENDS_AND_DELISTINGS, Report, backtest, caveats,
 };
+pub use turnover::{NOT_A_TRIAL, Replay, SUB_UNIVERSES};
