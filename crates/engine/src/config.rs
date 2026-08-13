@@ -50,6 +50,14 @@ pub const VARIANT_PRICE_FLOOR_10: &str = "price-floor-10";
 /// The variant of [`LOWVOL_PROGRAM`] that drops the least liquid names.
 pub const VARIANT_LIQUIDITY_SCREENED: &str = "liquidity-screened";
 
+/// The variant of [`LOWVOL_PROGRAM`] that weights its holdings by market cap.
+///
+/// The strongest artifact check the low-volatility literature has. Equal
+/// weighting overweights small names, so if the advantage lives
+/// disproportionately in the small end, part of it is a size and illiquidity
+/// effect rather than a property of calm stocks.
+pub const VARIANT_VALUE_WEIGHTED: &str = "value-weighted";
+
 /// The name recorded in [`BacktestConfig::delisting_convention`] when a run
 /// imputes delisting returns.
 ///
@@ -84,8 +92,35 @@ pub const RUNNABLE: &[(&str, Option<&str>)] = &[
     (LOWVOL_PROGRAM, None),
     (LOWVOL_PROGRAM, Some(VARIANT_PRICE_FLOOR_10)),
     (LOWVOL_PROGRAM, Some(VARIANT_LIQUIDITY_SCREENED)),
+    (LOWVOL_PROGRAM, Some(VARIANT_VALUE_WEIGHTED)),
     (CONSERVATIVE_PROGRAM, None),
 ];
+
+/// How much of the portfolio each held name gets.
+///
+/// # Why this is in the hashed configuration rather than a second program
+///
+/// The signal, the eligibility rules, the cost model and the schedule are
+/// identical between a run and its value-weighted rerun. What differs is one
+/// vector. That makes it a robustness variant of one hypothesis rather than a
+/// second hypothesis, so it is recorded under the bare program name and the
+/// difference travels in the config hash, which is what keeps the scoped `N` of
+/// rule 2 grouping a hypothesis with its own reruns.
+///
+/// Serialised as a snake_case string, matching [`Strategy`] and every other
+/// token in the canonical form. `Copy` because it is a small tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Weighting {
+    /// One over the number of held names, each.
+    Equal,
+    /// Proportional to market capitalisation at the formation date, with no
+    /// cap, no floor and no smoothing. A name with no market cap figure at the
+    /// formation, or one carrying zero, cannot be weighted and is excluded from
+    /// selection before the ranking rather than after it, so the quintile is a
+    /// quintile of names that can actually be held.
+    ValueByMarketcap,
+}
 
 /// Which signal decides what is held.
 ///
@@ -136,6 +171,14 @@ pub struct BacktestConfig {
     /// Which signal ranks the eligible names, and which end of the ranking is
     /// held.
     pub strategy: Strategy,
+
+    /// How much of the portfolio each held name gets.
+    ///
+    /// Adding this field moves every previously recorded hash, `Equal` or not,
+    /// because the canonical form gains a key. That is inherent to hashing the
+    /// whole struct and is accepted, as it was when `strategy`,
+    /// `liquidity_floor_fraction` and `delisting_convention` were added.
+    pub weighting: Weighting,
 
     /// Months of price history the formation window spans, counting back from
     /// the rebalance month inclusive. Twelve, with one skipped, is the
@@ -367,6 +410,13 @@ impl BacktestConfig {
                 liquidity_floor_fraction: Some(Decimal::new(2, 1)),
                 ..Self::lowvol_v0(universe_sha256)
             }),
+            // The same selection weighted by size instead. One weighting, not a
+            // sweep of tilts: every intermediate blend between equal and value
+            // would be another trial and rule 2 counts them all.
+            (LOWVOL_PROGRAM, Some(VARIANT_VALUE_WEIGHTED)) => Some(Self {
+                weighting: Weighting::ValueByMarketcap,
+                ..Self::lowvol_v0(universe_sha256)
+            }),
             (CONSERVATIVE_PROGRAM, None) => Some(Self::conservative_v0(universe_sha256)),
             // Listed in the registry with nothing to build. Unreachable while
             // the two agree, and the registry walk in the CLI tests is what
@@ -382,6 +432,7 @@ impl BacktestConfig {
     pub fn momentum_v0(universe_sha256: impl Into<String>) -> Self {
         Self {
             strategy: Strategy::Momentum,
+            weighting: Weighting::Equal,
             signal_lookback_months: 12,
             signal_skip_months: 1,
             quintile_divisor: 5,

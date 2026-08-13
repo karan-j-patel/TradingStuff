@@ -557,6 +557,7 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "engine",
  "ingest",
@@ -908,6 +909,7 @@ name = "ingest"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "bytes",
  "jiff",
  "parquet",
  "rust_decimal",

@@ -17,7 +17,7 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 
 use crate::baseline::{self, BaselineSeries, RandomBaseline, SplitMix64};
-use crate::config::{BacktestConfig, Strategy};
+use crate::config::{BacktestConfig, Strategy, Weighting};
 use crate::error::EngineError;
 use crate::momentum::{self, FormationCensus, Rebalance};
 use crate::panel::Panel;
@@ -171,7 +171,14 @@ pub fn run_schedule(
             // the cost of selling it lands on the month just finished.
             Weights::new()
         } else {
-            portfolio::equal_weight(&pick(position, rebalance))?
+            // The weights are fixed at the formation date, so nothing dated
+            // after it can reach a holding. Rule 4.
+            portfolio::weights_at(
+                panel,
+                config.weighting,
+                &pick(position, rebalance),
+                rebalance.date,
+            )?
         };
 
         let moved = portfolio::traded_notional(&held, &target)?;
@@ -241,7 +248,20 @@ pub struct Report {
     /// Carried whole rather than summarised, so a caller that wants every row
     /// has it and the printer can decide how much of it to show.
     pub formations: Vec<FormationCensus>,
+    /// Buy-and-hold weighted the way the strategy is, which is the comparison
+    /// rule 5 asks for. Comparing a value-weighted strategy against an
+    /// equal-weighted baseline confounds the weighting change with the strategy
+    /// change.
     pub buy_and_hold: BaselineSeries,
+    /// The same baseline weighted equally, carried only when that is not what
+    /// [`Report::buy_and_hold`] already is.
+    ///
+    /// Every other research program reports against equal-weight buy-and-hold
+    /// and `DECISION_CRITERIA.md` gate G2.4 names it, so a variant that dropped
+    /// the figure would be incomparable with everything beside it. `None` under
+    /// equal weighting, where printing it would be printing the matched
+    /// baseline twice and would suggest a comparison had been made.
+    pub equal_weighted_buy_and_hold: Option<BaselineSeries>,
     pub random: RandomBaseline,
     /// Whether cash dividends are in these returns, which decides which caveat
     /// block the figures are published under.
@@ -294,6 +314,45 @@ fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineErro
         });
     }
 
+    // Presence agreeing is not identity agreeing. Every check above asks only
+    // whether a dataset was named and attached, and a configuration recording
+    // the digest of file A while the panel holds file B passes all three. That
+    // run publishes numbers under a hash describing data it never read, and the
+    // digest is the only description of the input the trial log keeps, so
+    // nothing downstream can notice.
+    //
+    // One loop over all three rather than a check beside each presence test.
+    // The hazard is identical for every dataset, and the near-miss worth
+    // avoiding is a fourth attachment arriving later with a presence check and
+    // no equality check.
+    for (dataset, recorded, attached) in [
+        (
+            "actions",
+            config.actions_sha256.as_deref(),
+            panel.dividends_sha256(),
+        ),
+        (
+            "delistings",
+            config.delistings_sha256.as_deref(),
+            panel.delistings_sha256(),
+        ),
+        (
+            "market cap",
+            config.marketcap_sha256.as_deref(),
+            panel.marketcaps_sha256(),
+        ),
+    ] {
+        if let (Some(recorded), Some(attached)) = (recorded, attached)
+            && recorded != attached
+        {
+            return Err(EngineError::DatasetDigestMismatch {
+                dataset,
+                recorded: recorded.to_owned(),
+                attached: attached.to_owned(),
+            });
+        }
+    }
+
     // The conservative formula refuses the degraded run rather than producing
     // one. Without dividends its payout leg is a share-count change with no
     // payout in it, without market caps it has neither that leg nor its size
@@ -310,6 +369,29 @@ fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineErro
             delistings: panel.delistings_attached(),
             marketcaps: panel.marketcaps_attached(),
         });
+    }
+
+    // Value weighting needs the market caps themselves, which is a stronger
+    // requirement than the hash agreement checked above. A run asked for
+    // `--variant value-weighted` with no `--marketcap` argument satisfies that
+    // check, because the configuration names no file and the panel carries no
+    // caps, so nothing before this point refuses it.
+    //
+    // # What this guard does and does not prevent, measured
+    //
+    // It does not prevent a silent equal-weighted run. Removing it does not
+    // produce one: selection already excludes every name that cannot be
+    // weighted, so with no caps at all the field empties and the run fails with
+    // `EligibilityCollapse` across every rebalance date. That was measured
+    // rather than assumed, by returning early ahead of this check.
+    //
+    // What it prevents is that failure naming the wrong cause. "Every rebalance
+    // date had an empty eligible set" points a reader at the universe, the
+    // price floor and the coverage rule, none of which is what went wrong. The
+    // cause is a missing `--marketcap` argument, and this says so at the
+    // boundary where the configuration and the panel are compared.
+    if config.weighting == Weighting::ValueByMarketcap && !panel.marketcaps_attached() {
+        return Err(EngineError::ValueWeightingMissingMarketcaps);
     }
     Ok(())
 }
@@ -380,7 +462,18 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
         .and_then(|two_way| two_way.checked_div(Decimal::from(2u64)))
         .ok_or_else(|| EngineError::math("averaging turnover"))?;
 
-    let buy_and_hold = baseline::buy_and_hold(panel, config, &rebalances)?;
+    let buy_and_hold = baseline::buy_and_hold(panel, config, &rebalances, config.weighting)?;
+    let equal_weighted_buy_and_hold = match config.weighting {
+        // Already computed above, and a second copy of one number is not a
+        // second comparison.
+        Weighting::Equal => None,
+        _ => Some(baseline::buy_and_hold(
+            panel,
+            config,
+            &rebalances,
+            Weighting::Equal,
+        )?),
+    };
 
     let mut draws = Vec::with_capacity(config.random_draws);
     for draw in 0..config.random_draws {
@@ -420,6 +513,7 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
             .collect(),
         strategy,
         buy_and_hold,
+        equal_weighted_buy_and_hold,
         random,
         // Equal to `config.actions_sha256.is_some()` by the guard at the top of
         // this function, and read off the panel because the panel is what the

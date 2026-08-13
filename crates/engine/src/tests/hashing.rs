@@ -5,7 +5,7 @@
 //! because that is where the append happens.
 
 use super::test_config;
-use crate::config::{BacktestConfig, Strategy};
+use crate::config::{BacktestConfig, Strategy, Weighting};
 
 /// Every field of the configuration reaches the hash.
 ///
@@ -25,6 +25,14 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
         // share a hash.
         BacktestConfig {
             strategy: Strategy::LowVolatility,
+            ..base.clone()
+        },
+        // The identical selection held at two different sets of weights is two
+        // portfolios, not one measured twice. Equal weighting overweights small
+        // names, so the two runs are two hypotheses about where an advantage
+        // lives rather than one hypothesis measured better.
+        BacktestConfig {
+            weighting: Weighting::ValueByMarketcap,
             ..base.clone()
         },
         BacktestConfig {
@@ -247,6 +255,15 @@ fn the_canonical_form_is_sorted_and_compact() {
     // while changing nothing anyone meant to change.
     assert!(
         canonical.contains(r#""delisting_convention":null,"delistings_sha256":null"#),
+        "got {canonical}"
+    );
+
+    // Both ends of the sorted form pinned rather than only the first. A field
+    // added at either end moves every recorded hash, and the prefix pin above
+    // is silent about the last key. `weighting` sorts last because `w` is the
+    // highest first byte any field name here starts with.
+    assert!(
+        canonical.ends_with(r#","weighting":"equal"}"#),
         "got {canonical}"
     );
 }

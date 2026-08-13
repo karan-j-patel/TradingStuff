@@ -17,9 +17,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use ::parquet::file::reader::ChunkReader;
 use arrow::array::{ArrayRef, Date32Array, Decimal128Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 
 use super::CurateError;
 use super::codec::{
@@ -159,8 +161,23 @@ pub fn write_marketcap(
 /// does not say what units its figures are in is a file whose numbers cannot be
 /// used, and the two candidate readings differ by a factor of a million.
 pub fn read_marketcap(path: &Path) -> Result<Vec<MarketCapRecord>, CurateError> {
-    let file = super::open(path)?;
-    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+    decode(super::open(path)?)
+}
+
+/// The same read, from bytes already in memory.
+///
+/// Exists so a caller can hash a file and parse it from one `read`. See
+/// the `read_*_from_bytes` section of [`super`] for why a second read of the
+/// same path is a correctness problem rather than a performance one.
+pub fn read_marketcap_from_bytes(bytes: Bytes) -> Result<Vec<MarketCapRecord>, CurateError> {
+    decode(bytes)
+}
+
+/// The body both entry points share, so neither can validate less than the
+/// other. In particular the units and source check below runs before a row is
+/// decoded on both paths.
+fn decode<R: ChunkReader + 'static>(source: R) -> Result<Vec<MarketCapRecord>, CurateError> {
+    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(source)?;
 
     provenance_of(builder.metadata().file_metadata().key_value_metadata())?;
 

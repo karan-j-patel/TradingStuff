@@ -399,27 +399,31 @@ pub struct Panel {
     securities: Vec<Series>,
     dates: Vec<Date>,
     month_ends: Vec<Date>,
-    /// Whether dividends have been attached at all, which is a different
-    /// question from whether any arrived. True after an attachment that matched
-    /// nothing, because the run still read an actions file and still reports
+    /// SHA-256 of the actions file this panel's dividends were built from, or
+    /// `None` if none was attached.
+    ///
+    /// The digest rather than a bare flag, because a flag only says that some
+    /// actions file was read and the trial log records exactly which one. A run
+    /// whose configuration names file A while the panel was built from file B
+    /// publishes numbers no reader can reproduce from what the log holds, and a
+    /// presence check cannot see the difference. `Some` after an attachment that
+    /// matched nothing, because the run still read the file and still reports
     /// dividend-inclusive returns.
-    dividends_attached: bool,
+    dividends_sha256: Option<String>,
     /// Records naming a security this panel does not hold.
     unmatched_dividends: usize,
     /// Records that were not cash dividends, and so were not consumed.
     non_cash_actions: usize,
-    /// Whether a delistings dataset was attached at all, which is a different
-    /// question from whether any exit was classified. True after an attachment
-    /// that matched nothing, because the run still read a delistings file and
-    /// still reports imputed exits.
-    delistings_attached: bool,
+    /// SHA-256 of the delistings file this panel's classified exits were built
+    /// from, or `None` if none was attached. Same rule as
+    /// [`Panel::dividends_sha256`] and for the same reason.
+    delistings_sha256: Option<String>,
     /// Delisting records naming a security this panel does not hold.
     unmatched_delistings: usize,
-    /// Whether a market cap dataset was attached at all, which is a different
-    /// question from whether any figure matched. True after an attachment that
-    /// matched nothing, because the run still read a market cap file and its
-    /// configuration hash still says so.
-    marketcaps_attached: bool,
+    /// SHA-256 of the market cap file this panel's figures were built from, or
+    /// `None` if none was attached. Same rule as [`Panel::dividends_sha256`] and
+    /// for the same reason.
+    marketcaps_sha256: Option<String>,
     /// Market cap records naming a security this panel does not hold.
     unmatched_marketcaps: usize,
 }
@@ -474,12 +478,12 @@ impl Panel {
             securities,
             dates,
             month_ends,
-            dividends_attached: false,
+            dividends_sha256: None,
             unmatched_dividends: 0,
             non_cash_actions: 0,
-            delistings_attached: false,
+            delistings_sha256: None,
             unmatched_delistings: 0,
-            marketcaps_attached: false,
+            marketcaps_sha256: None,
             unmatched_marketcaps: 0,
         })
     }
@@ -496,7 +500,11 @@ impl Panel {
     /// Everything not consumed is counted rather than dropped quietly, because
     /// a census of what was ignored is the only way anyone notices that a file
     /// was mostly ignored.
-    pub fn with_dividends(self, records: &[ActionRecord]) -> Result<Panel, EngineError> {
+    pub fn with_dividends(
+        self,
+        records: &[ActionRecord],
+        sha256: &str,
+    ) -> Result<Panel, EngineError> {
         let mut by_identity: BTreeMap<String, Vec<CashDividend>> = BTreeMap::new();
         let mut non_cash_actions = 0usize;
 
@@ -538,9 +546,9 @@ impl Panel {
             securities,
             dates,
             month_ends,
-            delistings_attached,
+            delistings_sha256,
             unmatched_delistings,
-            marketcaps_attached,
+            marketcaps_sha256,
             unmatched_marketcaps,
             ..
         } = self;
@@ -573,12 +581,12 @@ impl Panel {
             securities,
             dates,
             month_ends,
-            dividends_attached: true,
+            dividends_sha256: Some(sha256.to_owned()),
             unmatched_dividends,
             non_cash_actions,
-            delistings_attached,
+            delistings_sha256,
             unmatched_delistings,
-            marketcaps_attached,
+            marketcaps_sha256,
             unmatched_marketcaps,
         })
     }
@@ -590,7 +598,11 @@ impl Panel {
     /// security stopped trading. That trigger is the absent bar in
     /// [`crate::portfolio::advance`] and it is unchanged by this round, so a
     /// delisting record for a name that kept trading changes nothing at all.
-    pub fn with_delistings(self, delistings: &[Delisting]) -> Result<Panel, EngineError> {
+    pub fn with_delistings(
+        self,
+        delistings: &[Delisting],
+        sha256: &str,
+    ) -> Result<Panel, EngineError> {
         let mut by_identity: BTreeMap<String, Vec<ClassifiedExit>> = BTreeMap::new();
         for record in delistings {
             by_identity
@@ -609,10 +621,10 @@ impl Panel {
             securities,
             dates,
             month_ends,
-            dividends_attached,
+            dividends_sha256,
             unmatched_dividends,
             non_cash_actions,
-            marketcaps_attached,
+            marketcaps_sha256,
             unmatched_marketcaps,
             ..
         } = self;
@@ -642,12 +654,12 @@ impl Panel {
             securities,
             dates,
             month_ends,
-            dividends_attached,
+            dividends_sha256,
             unmatched_dividends,
             non_cash_actions,
-            delistings_attached: true,
+            delistings_sha256: Some(sha256.to_owned()),
             unmatched_delistings,
-            marketcaps_attached,
+            marketcaps_sha256,
             unmatched_marketcaps,
         })
     }
@@ -669,7 +681,11 @@ impl Panel {
     /// dividend is: this table expresses a missing figure by omitting the row,
     /// which makes a silently dropped corrupt row indistinguishable from the
     /// absence that happens all the time.
-    pub fn with_marketcaps(self, records: &[MarketCapRecord]) -> Result<Panel, EngineError> {
+    pub fn with_marketcaps(
+        self,
+        records: &[MarketCapRecord],
+        sha256: &str,
+    ) -> Result<Panel, EngineError> {
         let mut by_identity: BTreeMap<String, Vec<(Date, Decimal)>> = BTreeMap::new();
         for record in records {
             if record.marketcap < Decimal::ZERO {
@@ -691,10 +707,10 @@ impl Panel {
             securities,
             dates,
             month_ends,
-            dividends_attached,
+            dividends_sha256,
             unmatched_dividends,
             non_cash_actions,
-            delistings_attached,
+            delistings_sha256,
             unmatched_delistings,
             ..
         } = self;
@@ -726,12 +742,12 @@ impl Panel {
             securities,
             dates,
             month_ends,
-            dividends_attached,
+            dividends_sha256,
             unmatched_dividends,
             non_cash_actions,
-            delistings_attached,
+            delistings_sha256,
             unmatched_delistings,
-            marketcaps_attached: true,
+            marketcaps_sha256: Some(sha256.to_owned()),
             unmatched_marketcaps,
         })
     }
@@ -742,7 +758,12 @@ impl Panel {
 
     /// Whether an actions file was attached, however little of it applied.
     pub fn dividends_attached(&self) -> bool {
-        self.dividends_attached
+        self.dividends_sha256.is_some()
+    }
+
+    /// The digest of the actions file the dividends came from.
+    pub fn dividends_sha256(&self) -> Option<&str> {
+        self.dividends_sha256.as_deref()
     }
 
     /// Dividend records naming a security outside this panel.
@@ -757,7 +778,12 @@ impl Panel {
 
     /// Whether a delistings file was attached, however little of it applied.
     pub fn delistings_attached(&self) -> bool {
-        self.delistings_attached
+        self.delistings_sha256.is_some()
+    }
+
+    /// The digest of the delistings file the classified exits came from.
+    pub fn delistings_sha256(&self) -> Option<&str> {
+        self.delistings_sha256.as_deref()
     }
 
     /// Delisting records naming a security outside this panel.
@@ -767,7 +793,12 @@ impl Panel {
 
     /// Whether a market cap file was attached, however little of it matched.
     pub fn marketcaps_attached(&self) -> bool {
-        self.marketcaps_attached
+        self.marketcaps_sha256.is_some()
+    }
+
+    /// The digest of the market cap file the figures came from.
+    pub fn marketcaps_sha256(&self) -> Option<&str> {
+        self.marketcaps_sha256.as_deref()
     }
 
     /// Market cap records naming a security outside this panel.

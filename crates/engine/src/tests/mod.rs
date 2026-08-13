@@ -24,6 +24,8 @@ mod eligibility;
 mod hashing;
 mod lowvol;
 mod screens;
+mod weighting;
+mod wiring;
 
 use ingest::actions::{
     ActionRecord, CorporateAction, Delisting, DelistingReason, DividendKind, Listing, TerminalValue,
@@ -35,6 +37,18 @@ use rust_decimal::Decimal;
 
 use crate::config::BacktestConfig;
 use crate::panel::Panel;
+
+/// Placeholder digests the fixture panels attach under.
+///
+/// Not real SHA-256 values. The wiring guard compares the configuration's
+/// recorded digest against the panel's for equality, so what a fixture needs is
+/// for the two to agree, and named constants are what stop them drifting apart
+/// silently. `wired()` in the conservative tests records exactly these.
+pub const ACTIONS_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+pub const DELISTINGS_SHA256: &str =
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+pub const MARKETCAP_SHA256: &str =
+    "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm";
 
 /// A stable-identity asset key. The permaticker is what the panel sorts on, so
 /// the numbers here fix the security order the tests assert against.
@@ -196,7 +210,7 @@ pub fn with_cash_dividends(panel: Panel, dividends: &[(AssetKey, Date, Decimal)]
         .map(|(asset, ex_date, amount)| cash_dividend(asset, *ex_date, *amount))
         .collect();
     panel
-        .with_dividends(&records)
+        .with_dividends(&records, ACTIONS_SHA256)
         .expect("fixture dividends attach")
 }
 
@@ -229,7 +243,7 @@ pub fn delisting(asset: AssetKey, date: Date, reason: DelistingReason) -> Delist
 /// path that has none.
 pub fn with_delistings(panel: Panel, delistings: &[Delisting]) -> Panel {
     panel
-        .with_delistings(delistings)
+        .with_delistings(delistings, DELISTINGS_SHA256)
         .expect("fixture delistings attach")
 }
 

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
 engine = { path = "../engine" }
 ingest = { path = "../ingest" }

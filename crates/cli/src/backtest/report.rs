@@ -114,10 +114,23 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
 
     println!("Baselines, rule 5.");
     println!(
-        "  equal-weight buy-and-hold:  total {}   annualised Sharpe {}",
+        "  {} buy-and-hold:  total {}   annualised Sharpe {}",
+        weighting_label(report.config.weighting),
         show(report.buy_and_hold.total_net_return),
         show_option(report.buy_and_hold.annualised_sharpe, "none")
     );
+    // Printed only when it is not the line above. Every other research program
+    // reports against equal-weight buy-and-hold and gate G2.4 names it, so a
+    // weighted variant that dropped the figure would be incomparable with
+    // everything beside it.
+    if let Some(reference) = &report.equal_weighted_buy_and_hold {
+        println!(
+            "  equal-weight buy-and-hold:  total {}   annualised Sharpe {}   cross-variant \
+             reference, not the matched baseline",
+            show(reference.total_net_return),
+            show_option(reference.annualised_sharpe, "none")
+        );
+    }
     println!(
         "  random ranking, {} seeds:   mean {}   min {}   max {}   spread {}",
         report.config.random_draws,
@@ -125,6 +138,10 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
         show_option(report.random.min_sharpe, "none"),
         show_option(report.random.max_sharpe, "none"),
         show_option(report.random.spread, "none"),
+    );
+    println!(
+        "    matched on turnover, holding period, and weighting: {}",
+        weighting_label(report.config.weighting)
     );
     println!(
         "  linear model:               {}",
@@ -142,6 +159,19 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
     println!("Caveats, recorded with the result.");
     println!("  {}", caveat_block(report));
     println!();
+}
+
+/// How the run weighted its holdings, in the words the baseline lines use.
+///
+/// A function rather than a literal at each call site, on the rule
+/// [`caveat_block`] follows. The matched baseline and the strategy are weighted
+/// the same way by construction, and a label that named one of them wrongly
+/// would describe a comparison that was not the one made.
+pub(super) fn weighting_label(weighting: engine::Weighting) -> &'static str {
+    match weighting {
+        engine::Weighting::Equal => "equal-weight",
+        engine::Weighting::ValueByMarketcap => "value-weight",
+    }
 }
 
 /// Where the cross-section went, stage by stage, across every formation.

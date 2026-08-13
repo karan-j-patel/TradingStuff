@@ -126,11 +126,11 @@ fn cf_panel(names: &[CfSeries], dividends: &[(AssetKey, Date, Decimal)]) -> Pane
     let no_delistings: [Delisting; 0] = [];
     Panel::from_bars(bars)
         .expect("fixture panel builds")
-        .with_dividends(&records)
+        .with_dividends(&records, super::ACTIONS_SHA256)
         .expect("fixture dividends attach")
-        .with_delistings(&no_delistings)
+        .with_delistings(&no_delistings, super::DELISTINGS_SHA256)
         .expect("fixture delistings attach")
-        .with_marketcaps(&caps)
+        .with_marketcaps(&caps, super::MARKETCAP_SHA256)
         .expect("fixture market caps attach")
 }
 
@@ -156,14 +156,17 @@ fn conservative_config() -> BacktestConfig {
 
 /// The same configuration with the three file hashes the wiring guards demand.
 ///
-/// The values are placeholders rather than real digests, because what the
-/// guards compare is presence and not content.
+/// The values are placeholders rather than real digests. What the guards
+/// compare is presence, and then whether the configuration's digest equals the
+/// one the panel was attached under, so a fixture needs the two sides to agree
+/// rather than to be a hash of anything. [`super::ACTIONS_SHA256`] and its two
+/// siblings are what `cf_panel` attaches with.
 fn wired(config: BacktestConfig) -> BacktestConfig {
     BacktestConfig {
-        actions_sha256: Some("a".repeat(64)),
+        actions_sha256: Some(super::ACTIONS_SHA256.to_string()),
         delisting_convention: Some(DELISTING_CONVENTION.to_string()),
-        delistings_sha256: Some("d".repeat(64)),
-        marketcap_sha256: Some("m".repeat(64)),
+        delistings_sha256: Some(super::DELISTINGS_SHA256.to_string()),
+        marketcap_sha256: Some(super::MARKETCAP_SHA256.to_string()),
         ..config
     }
 }
@@ -905,9 +908,9 @@ fn xc7_the_wiring_guards_refuse_a_run_that_would_be_mislabelled() {
         let no_delistings: [Delisting; 0] = [];
         Panel::from_bars(bars)
             .expect("panel builds")
-            .with_dividends(&[])
+            .with_dividends(&[], super::ACTIONS_SHA256)
             .expect("dividends attach")
-            .with_delistings(&no_delistings)
+            .with_delistings(&no_delistings, super::DELISTINGS_SHA256)
             .expect("delistings attach")
     };
     assert!(
@@ -958,9 +961,9 @@ fn xc7_the_wiring_guards_refuse_a_run_that_would_be_mislabelled() {
         let no_delistings: [Delisting; 0] = [];
         Panel::from_bars(bars)
             .expect("panel builds")
-            .with_delistings(&no_delistings)
+            .with_delistings(&no_delistings, super::DELISTINGS_SHA256)
             .expect("delistings attach")
-            .with_marketcaps(&caps)
+            .with_marketcaps(&caps, super::MARKETCAP_SHA256)
             .expect("market caps attach")
     };
     assert!(

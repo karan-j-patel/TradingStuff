@@ -143,6 +143,34 @@ pub enum EngineError {
     )]
     SizeFloorFractionOutOfRange { fraction: rust_decimal::Decimal },
 
+    #[error(
+        "the configuration records the {dataset} file {recorded} and the panel was built from \
+         {attached}. A run whose recorded digest is not the digest of the data it read publishes \
+         numbers that cannot be reproduced from the trial log, and the log holds no other \
+         description of the input"
+    )]
+    DatasetDigestMismatch {
+        dataset: &'static str,
+        recorded: String,
+        attached: String,
+    },
+
+    #[error(
+        "the configuration weights holdings by market cap and the panel carries no attached \
+         market caps, so no name can be weighted and none would survive selection. Refused here \
+         rather than left to surface as an empty eligible set at every rebalance, which is the \
+         same failure describing the wrong cause"
+    )]
+    ValueWeightingMissingMarketcaps,
+
+    #[error(
+        "security {security} is held at the formation on {date} and has no positive market cap \
+         there, so it has no weight. Selection excludes an unweightable name before the ranking, \
+         so reaching here means the exclusion rule and the weighting disagree about what is \
+         holdable"
+    )]
+    UnweightableHolding { security: usize, date: Date },
+
     #[error("encoding the configuration for hashing failed")]
     ConfigEncode(#[source] serde_json::Error),
 }

@@ -303,7 +303,7 @@ fn unmatched_and_non_cash_records_are_counted_rather_than_dropped() {
     ];
 
     let panel = two_asset_panel()
-        .with_dividends(&records)
+        .with_dividends(&records, super::ACTIONS_SHA256)
         .expect("attaches");
 
     assert_eq!(panel.unmatched_dividends(), 1);
@@ -336,7 +336,7 @@ fn a_dividend_matching_on_ticker_alone_is_not_attached() {
     )];
 
     let panel = two_asset_panel()
-        .with_dividends(&records)
+        .with_dividends(&records, super::ACTIONS_SHA256)
         .expect("attaches");
 
     assert_eq!(panel.unmatched_dividends(), 1);
@@ -356,7 +356,7 @@ fn a_non_positive_dividend_amount_is_refused() {
     let records = vec![cash_dividend(&aaa, date(2020, 4, 15), dec("0"))];
 
     assert!(matches!(
-        two_asset_panel().with_dividends(&records),
+        two_asset_panel().with_dividends(&records, super::ACTIONS_SHA256),
         Err(crate::error::EngineError::NonPositiveDividend { .. })
     ));
 }
@@ -418,7 +418,7 @@ fn e8h_the_caveat_block_follows_the_dividend_flag() {
 /// halves of the wiring to agree.
 fn with_actions(config: BacktestConfig) -> BacktestConfig {
     BacktestConfig {
-        actions_sha256: Some("a".repeat(64)),
+        actions_sha256: Some(super::ACTIONS_SHA256.to_string()),
         ..config
     }
 }

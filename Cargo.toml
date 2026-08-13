@@ -16,6 +16,11 @@ anyhow = "1.0.104"
 # parquet's default features already include zstd, so no extra flag is needed.
 arrow = "59.2.0"
 parquet = "59.2.0"
+# Already in the graph as parquet's own dependency, at the same version, so this
+# adds no crate to the build. Declared directly because the curated readers name
+# `Bytes` in their signatures, and a type reached through a transitive
+# dependency is one `cargo update` away from not being there.
+bytes = "1.12.1"
 clap = { version = "4.6.6", features = ["derive"] }
 jiff = { version = "0.2.35", features = ["serde"] }
 # `maths` supplies `sqrt` and `checked_ln` on Decimal. The trial-count threshold

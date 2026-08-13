@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context as _;
+use bytes::Bytes;
 use engine::{BacktestConfig, Panel, Report};
 use ingest::schema::AssetKey;
 use rigor::{ConfigHash, TrialLog};
@@ -136,6 +137,77 @@ impl<'a> Strategy<'a> {
                  --prices together with --universe to run the momentum engine"
             ),
         }
+    }
+}
+
+/// One optional dataset file, read exactly once.
+///
+/// # Why the bytes are carried rather than the path
+///
+/// The recorded digest and the parsed records have to describe the same bytes.
+/// Hashing one `read` of a path and parsing a second `read` of it does not
+/// guarantee that: between the two the file can be replaced, by a concurrent
+/// refetch or by a hand, and the run then produces results from data B under a
+/// hash recording data A. That was the shape of the finding this type exists to
+/// close, and it applied to all three attachments equally.
+///
+/// So the file is read once here and both consumers are served from the buffer.
+struct Attachment {
+    sha256: String,
+    bytes: Bytes,
+}
+
+impl Attachment {
+    /// Read `path` once, keeping the bytes and their digest together.
+    fn read(path: &Path, dataset: &str) -> anyhow::Result<Self> {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading the {dataset} file {}", path.display()))?;
+        // Hashed over the bytes on disk, so the recorded value is what `shasum`
+        // prints for the same file, and a refetch that changed nothing records
+        // the same trial.
+        let sha256 = rigor::hash_bytes(&bytes);
+        Ok(Attachment {
+            sha256,
+            bytes: Bytes::from(bytes),
+        })
+    }
+}
+
+/// The three optional attachments, each read once.
+///
+/// Gathered into one value rather than threaded as six arguments, so the
+/// read-once rule is stated in one place and a fourth dataset joins without
+/// growing every signature between here and the panel.
+#[derive(Default)]
+struct Attachments {
+    actions: Option<Attachment>,
+    delistings: Option<Attachment>,
+    marketcap: Option<Attachment>,
+}
+
+impl Attachments {
+    fn read(
+        actions: Option<&Path>,
+        delistings: Option<&Path>,
+        marketcap: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        Ok(Attachments {
+            actions: actions
+                .map(|path| Attachment::read(path, "actions"))
+                .transpose()?,
+            delistings: delistings
+                .map(|path| Attachment::read(path, "delistings"))
+                .transpose()?,
+            marketcap: marketcap
+                .map(|path| Attachment::read(path, "market cap"))
+                .transpose()?,
+        })
+    }
+
+    fn sha256(attachment: &Option<Attachment>) -> Option<String> {
+        attachment
+            .as_ref()
+            .map(|attachment| attachment.sha256.clone())
     }
 }
 
@@ -252,17 +324,23 @@ fn engine_run(
         )
     };
 
-    let (config, members) =
-        match resolve(program, variant, universe, actions, delistings, marketcap) {
-            Ok(resolved) => resolved,
-            Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
-        };
+    // Read before anything is resolved, because the digests the configuration
+    // records come out of these same buffers.
+    let attachments = match Attachments::read(actions, delistings, marketcap) {
+        Ok(attachments) => attachments,
+        Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
+    };
+
+    let (config, members) = match resolve(program, variant, universe, delistings, &attachments) {
+        Ok(resolved) => resolved,
+        Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
+    };
     let config_hash = match config.config_hash() {
         Ok(hash) => hash,
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
 
-    match execute(prices, actions, delistings, marketcap, &members, &config) {
+    match execute(prices, attachments, &members, &config) {
         Ok(report) => (config_hash, Outcome::Ran(Box::new(report))),
         Err(error) => (config_hash, Outcome::Failed(format!("{error:#}"))),
     }
@@ -291,9 +369,8 @@ fn resolve(
     program: &str,
     variant: Option<&str>,
     universe: &Path,
-    actions: Option<&Path>,
     delistings: Option<&Path>,
-    marketcap: Option<&Path>,
+    attachments: &Attachments,
 ) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>)> {
     let text = std::fs::read_to_string(universe)
         .with_context(|| format!("reading the universe file {}", universe.display()))?;
@@ -304,20 +381,11 @@ fn resolve(
         .map_err(|error| anyhow::anyhow!("universe file line {}: {}", error.line, error.source))?;
     let members = entries.into_iter().map(|entry| entry.asset).collect();
 
-    // Both datasets, one rule. Hashed over the bytes on disk, so the recorded
-    // value is what `shasum` prints for the same file, and a refetch that
-    // changed nothing records the same trial.
-    let hash_file = |path: Option<&Path>, dataset: &str| -> anyhow::Result<Option<String>> {
-        path.map(|path| {
-            std::fs::read(path)
-                .map(|bytes| rigor::hash_bytes(&bytes))
-                .with_context(|| format!("reading the {dataset} file {}", path.display()))
-        })
-        .transpose()
-    };
-    let actions_sha256 = hash_file(actions, "actions")?;
-    let delistings_sha256 = hash_file(delistings, "delistings")?;
-    let marketcap_sha256 = hash_file(marketcap, "market cap")?;
+    // All three datasets, one rule, and the digests come from the buffers the
+    // records will be parsed out of rather than from a second read of the path.
+    let actions_sha256 = Attachments::sha256(&attachments.actions);
+    let delistings_sha256 = Attachments::sha256(&attachments.delistings);
+    let marketcap_sha256 = Attachments::sha256(&attachments.marketcap);
 
     let config = BacktestConfig::for_program(program, variant, sha256).ok_or_else(|| {
         // Listed from the registry rather than written out, so a pair added
@@ -353,9 +421,7 @@ fn resolve(
 
 fn execute(
     prices: &Path,
-    actions: Option<&Path>,
-    delistings: Option<&Path>,
-    marketcap: Option<&Path>,
+    attachments: Attachments,
     members: &HashSet<AssetKey>,
     config: &BacktestConfig,
 ) -> anyhow::Result<Report> {
@@ -384,14 +450,19 @@ fn execute(
     // engine refuses a panel whose dividend state disagrees with the
     // configuration, so a mistake here fails loudly rather than producing a
     // number labelled as something it is not.
-    let panel = match actions {
+    let panel = match attachments.actions {
         None => panel,
-        Some(path) => {
-            let records = ingest::parquet::read_actions(path)
-                .with_context(|| format!("reading curated actions from {}", path.display()))?;
+        Some(attachment) => {
+            // Parsed from the bytes already read and already hashed, so the
+            // records and the recorded digest describe the same file.
+            let records = ingest::parquet::read_actions_from_bytes(attachment.bytes)
+                .context("reading curated actions")?;
             let read = records.len();
-            let panel = panel.with_dividends(&records)?;
-            println!("Read {read} corporate actions from {}.", path.display());
+            let panel = panel.with_dividends(&records, &attachment.sha256)?;
+            println!(
+                "Read {read} corporate actions, sha256 {}.",
+                attachment.sha256
+            );
             println!(
                 "  cash dividends applied to holdings, on their ex-dates, held uninvested \
                  until the next rebalance"
@@ -415,14 +486,14 @@ fn execute(
     // panel whose delisting state disagrees with the configuration, so a
     // mistake here fails loudly rather than publishing an imputation nothing
     // recorded.
-    let panel = match delistings {
+    let panel = match attachments.delistings {
         None => panel,
-        Some(path) => {
-            let records = ingest::parquet::read_delistings(path)
-                .with_context(|| format!("reading curated delistings from {}", path.display()))?;
+        Some(attachment) => {
+            let records = ingest::parquet::read_delistings_from_bytes(attachment.bytes)
+                .context("reading curated delistings")?;
             let read = records.len();
-            let panel = panel.with_delistings(&records)?;
-            println!("Read {read} delistings from {}.", path.display());
+            let panel = panel.with_delistings(&records, &attachment.sha256)?;
+            println!("Read {read} delistings, sha256 {}.", attachment.sha256);
             println!(
                 "  performance-related exits are imputed at the {} convention; \
                  mergers exit at their last close",
@@ -439,14 +510,14 @@ fn execute(
     // The third attachment, on the same rule as the first two. The engine
     // refuses a panel whose market cap state disagrees with the configuration,
     // and the conservative formula refuses to run without one at all.
-    let panel = match marketcap {
+    let panel = match attachments.marketcap {
         None => panel,
-        Some(path) => {
-            let records = ingest::parquet::read_marketcap(path)
-                .with_context(|| format!("reading curated market caps from {}", path.display()))?;
+        Some(attachment) => {
+            let records = ingest::parquet::read_marketcap_from_bytes(attachment.bytes)
+                .context("reading curated market caps")?;
             let read = records.len();
-            let panel = panel.with_marketcaps(&records)?;
-            println!("Read {read} market caps from {}.", path.display());
+            let panel = panel.with_marketcaps(&records, &attachment.sha256)?;
+            println!("Read {read} market caps, sha256 {}.", attachment.sha256);
             println!(
                 "  ranked by size at each formation, and divided by the adjusted close for \
                  the share-count leg of net payout yield"

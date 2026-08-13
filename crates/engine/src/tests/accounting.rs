@@ -315,7 +315,8 @@ fn e4b_buy_and_hold_pays_to_be_rid_of_a_delisted_name() {
          tell a mark at the last close from a mark at the entry"
     );
 
-    let held = baseline::buy_and_hold(&panel, &config, &rebalances).expect("baseline runs");
+    let held = baseline::buy_and_hold(&panel, &config, &rebalances, config.weighting)
+        .expect("baseline runs");
 
     // The middle month is the whole point. Without the exit charge it is 0,
     // because a delisting moves value to cash and nothing else happens.

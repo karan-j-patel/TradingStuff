@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 arrow.workspace = true
+bytes.workspace = true
 jiff = { workspace = true, features = ["serde"] }
 parquet.workspace = true
 rust_decimal.workspace = true

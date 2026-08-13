@@ -623,16 +623,15 @@ fn e11m_the_exit_block_follows_the_delistings_flag() {
     .expect("the fixture backtests");
 
     let records = ingest::parquet::read_delistings(&delistings).expect("read delistings");
+    let digest = rigor::hash_bytes(&fs::read(&delistings).expect("read delistings bytes"));
     let attached = engine::backtest(
         &Panel::from_bars(bars)
             .expect("panel builds")
-            .with_delistings(&records)
+            .with_delistings(&records, &digest)
             .expect("delistings attach"),
         &BacktestConfig {
             delisting_convention: Some(engine::DELISTING_CONVENTION.to_string()),
-            delistings_sha256: Some(rigor::hash_bytes(
-                &fs::read(&delistings).expect("read delistings bytes"),
-            )),
+            delistings_sha256: Some(digest.clone()),
             ..BacktestConfig::momentum_v0(&sha256)
         },
     )
@@ -986,15 +985,14 @@ fn e8h_the_printed_caveats_follow_the_dividend_flag() {
     .expect("the fixture backtests");
 
     let records = ingest::parquet::read_actions(&actions).expect("read actions");
+    let digest = rigor::hash_bytes(&fs::read(&actions).expect("read actions bytes"));
     let with = engine::backtest(
         &Panel::from_bars(bars)
             .expect("panel builds")
-            .with_dividends(&records)
+            .with_dividends(&records, &digest)
             .expect("dividends attach"),
         &BacktestConfig {
-            actions_sha256: Some(rigor::hash_bytes(
-                &fs::read(&actions).expect("read actions bytes"),
-            )),
+            actions_sha256: Some(digest.clone()),
             ..BacktestConfig::momentum_v0(&sha256)
         },
     )
@@ -1462,4 +1460,84 @@ fn e9e_the_n_caveat_prints_beside_every_dsr_block() {
         present.contains(report::N_CAVEAT),
         "the caveat is missing from a DSR block with a figure in it, got {present}"
     );
+}
+
+/// X-W2, command-line half. Nothing after the attachment read touches the
+/// attachment paths again.
+///
+/// # Why the files are deleted rather than modified
+///
+/// The finding this round closes was two `fs::read` calls on one path: the
+/// digest came from the first and the records from the second, so anything that
+/// replaced the file in between produced results from data B under a hash
+/// recording data A. That race cannot be reproduced deterministically in a test,
+/// and a test that tried would be timing-dependent rather than a test.
+///
+/// Deleting the three files after the single read states the property the race
+/// depends on, and states it deterministically: if any later step reaches for a
+/// path, it cannot merely disagree about contents, it fails outright. A version
+/// of this code that carried the paths forward and re-read them at parse time
+/// fails here, which is what makes this a test rather than a comment.
+///
+/// The price and universe files stay in place. They are read once already and
+/// are not what the finding was about.
+#[test]
+fn x_w2_the_attachment_paths_are_never_read_twice() {
+    let (prices, universe, actions, delistings, marketcap) = registry_dataset("single-read");
+
+    let text = fs::read_to_string(&universe).expect("read universe");
+    let members: std::collections::HashSet<ingest::schema::AssetKey> =
+        ingest::universe::from_jsonl(&text)
+            .expect("the fixture universe parses")
+            .into_iter()
+            .map(|entry| entry.asset)
+            .collect();
+
+    // The one read. Everything downstream is served from these buffers.
+    let attachments = Attachments::read(
+        Some(actions.as_path()),
+        Some(delistings.as_path()),
+        Some(marketcap.as_path()),
+    )
+    .expect("the attachments read");
+
+    for path in [&actions, &delistings, &marketcap] {
+        fs::remove_file(path).expect("removing a fixture attachment");
+        assert!(
+            !path.exists(),
+            "a fixture attachment survived removal, so this test cannot discriminate"
+        );
+    }
+
+    let config = BacktestConfig {
+        actions_sha256: Some(
+            attachments
+                .actions
+                .as_ref()
+                .expect("actions")
+                .sha256
+                .clone(),
+        ),
+        delisting_convention: Some(engine::DELISTING_CONVENTION.to_string()),
+        delistings_sha256: Some(
+            attachments
+                .delistings
+                .as_ref()
+                .expect("delistings")
+                .sha256
+                .clone(),
+        ),
+        marketcap_sha256: Some(
+            attachments
+                .marketcap
+                .as_ref()
+                .expect("marketcap")
+                .sha256
+                .clone(),
+        ),
+        ..BacktestConfig::lowvol_v0(rigor::hash_bytes(text.as_bytes()))
+    };
+
+    execute(&prices, attachments, &members, &config)
+        .expect("the run must complete with every attachment file deleted");
 }

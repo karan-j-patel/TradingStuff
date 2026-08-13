@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use rust_decimal::Decimal;
 
-use crate::config::BacktestConfig;
+use crate::config::{BacktestConfig, Weighting};
 use crate::error::EngineError;
 use crate::momentum::Rebalance;
 use crate::panel::Panel;
@@ -88,13 +88,26 @@ impl BaselineSeries {
     }
 }
 
-/// Equal-weight buy-and-hold of the eligible universe at the first rebalance.
+/// Buy-and-hold of the eligible universe at the first rebalance.
 ///
 /// Bought once, held to the end, costs at entry and exit only. A name that
 /// stops trading is marked at its last close and its value sits in cash from
 /// then on, which is what actually happens to a buy-and-hold investor holding a
 /// name that delists: they are left with whatever the last print was and no
 /// position.
+///
+/// # Why the weighting is an argument rather than read off the configuration
+///
+/// A baseline compared against a value-weighted strategy has to be
+/// value-weighted, or the comparison confounds the weighting change with the
+/// strategy change and the confounded number is the one that looks like a
+/// result. So the matched call passes `config.weighting`.
+///
+/// The equal-weighted reading is still wanted beside it as a cross-variant
+/// reference, because every other research program reports against equal-weight
+/// buy-and-hold and `DECISION_CRITERIA.md` gate G2.4 names it. That second call
+/// deliberately disagrees with the configuration, which is exactly why the
+/// disagreement is written at the call site instead of hidden inside here.
 ///
 /// # Why the marks come from the panel rather than from the formation dates
 ///
@@ -108,10 +121,18 @@ pub fn buy_and_hold(
     panel: &Panel,
     config: &BacktestConfig,
     rebalances: &[Rebalance],
+    weighting: Weighting,
 ) -> Result<BaselineSeries, EngineError> {
     let marks = &panel.month_ends()[rebalances[0].index..=rebalances[rebalances.len() - 1].index];
 
-    let mut alive: Weights = portfolio::equal_weight(&rebalances[0].eligible)?;
+    // Entered at the weight each name's market cap commands on the entry date,
+    // which is the first formation, and the book drifts from there.
+    let mut alive: Weights = portfolio::weights_at(
+        panel,
+        weighting,
+        &rebalances[0].eligible,
+        rebalances[0].date,
+    )?;
     let mut cash = Decimal::ZERO;
     let mut net_monthly = Vec::with_capacity(marks.len().saturating_sub(1));
 

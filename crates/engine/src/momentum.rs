@@ -43,7 +43,7 @@
 use jiff::civil::Date;
 use rust_decimal::Decimal;
 
-use crate::config::{BacktestConfig, Strategy};
+use crate::config::{BacktestConfig, Strategy, Weighting};
 use crate::error::EngineError;
 use crate::liquidity;
 use crate::lowvol;
@@ -200,6 +200,26 @@ pub fn rebalance_at(
         let Some(value) = value else {
             continue;
         };
+        // A name that cannot be weighted cannot be held, so it leaves the field
+        // here rather than being dropped out of the portfolio afterwards. The
+        // order is the decision: excluding after the ranking would take the
+        // quintile of a larger set and then remove names from the portfolio,
+        // which is a portfolio of a different size from the one the quintile
+        // describes. It is the same rule the conservative formula applies at
+        // its step 3, one weighting over.
+        //
+        // Zero is excluded alongside absent. The provider quantises market cap
+        // to a tenth of a million dollars, so a company below that quantum
+        // arrives as exactly zero on a row it deliberately shipped. That is a
+        // real value and the panel keeps it, but it divides into no weight.
+        if config.weighting == Weighting::ValueByMarketcap {
+            let holdable = panel.securities()[position]
+                .marketcap_at_month_end(date)
+                .is_some_and(|marketcap| marketcap > Decimal::ZERO);
+            if !holdable {
+                continue;
+            }
+        }
         eligible.push(position);
         signals.push((position, value));
     }

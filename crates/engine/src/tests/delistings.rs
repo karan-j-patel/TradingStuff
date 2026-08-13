@@ -233,7 +233,8 @@ fn e11b_buy_and_hold_applies_the_identical_delisting_treatment() {
          tell a mark at the last close from a mark at the entry"
     );
 
-    let held = baseline::buy_and_hold(&panel, &config, &rebalances).expect("baseline runs");
+    let held = baseline::buy_and_hold(&panel, &config, &rebalances, config.weighting)
+        .expect("baseline runs");
 
     assert_eq!(
         held.net_monthly[1],
@@ -679,7 +680,7 @@ fn e11i_the_engine_refuses_mismatched_delisting_wiring() {
             run::backtest(
                 &attached,
                 &BacktestConfig {
-                    delistings_sha256: Some("d".repeat(64)),
+                    delistings_sha256: Some(super::DELISTINGS_SHA256.to_string()),
                     ..test_config(2)
                 },
             ),
@@ -755,7 +756,7 @@ fn the_report_reads_its_delisting_flag_off_the_panel() {
 fn imputing(config: BacktestConfig) -> BacktestConfig {
     BacktestConfig {
         delisting_convention: Some(DELISTING_CONVENTION.to_string()),
-        delistings_sha256: Some("d".repeat(64)),
+        delistings_sha256: Some(super::DELISTINGS_SHA256.to_string()),
         ..config
     }
 }

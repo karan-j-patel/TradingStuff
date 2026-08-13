@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use jiff::civil::Date;
 use rust_decimal::{Decimal, MathematicalOps};
 
+use crate::config::Weighting;
 use crate::error::EngineError;
 use crate::panel::{ExitMark, Panel};
 
@@ -92,6 +93,84 @@ pub fn equal_weight(indices: &[usize]) -> Result<Weights, EngineError> {
         .checked_div(Decimal::from(indices.len()))
         .ok_or_else(|| EngineError::math("splitting the portfolio equally"))?;
     Ok(indices.iter().map(|index| (*index, each)).collect())
+}
+
+/// Weight across `indices` in proportion to market capitalisation at
+/// `formation`, normalised to sum to one.
+///
+/// The normalisation is what makes this a portfolio rather than a basket. The
+/// caps arrive in the vendor's units, so an unnormalised vector would express
+/// the holding in millions of dollars and every downstream figure, the return
+/// and the traded notional alike, would be scaled by the size of the universe.
+///
+/// # Lookahead
+///
+/// `formation` is the only date read. [`crate::panel::Series::marketcap_at_month_end`]
+/// takes the last figure dated on or before it and bounded to the same calendar
+/// month, so nothing published after the formation can reach a weight. Rule 4.
+///
+/// A name with no positive cap at `formation` is refused rather than defaulted
+/// or dropped. Selection already excludes those before the ranking, so an error
+/// here means the two rules disagree, and inventing a weight would hide the
+/// disagreement behind a number.
+pub fn value_weight(
+    panel: &Panel,
+    indices: &[usize],
+    formation: Date,
+) -> Result<Weights, EngineError> {
+    if indices.is_empty() {
+        return Ok(Weights::new());
+    }
+
+    let mut caps: Vec<(usize, Decimal)> = Vec::with_capacity(indices.len());
+    let mut total = Decimal::ZERO;
+    for index in indices {
+        let series = panel
+            .securities()
+            .get(*index)
+            .ok_or_else(|| EngineError::math("looking up a held security's market cap"))?;
+        let cap = series
+            .marketcap_at_month_end(formation)
+            .filter(|cap| *cap > Decimal::ZERO)
+            .ok_or(EngineError::UnweightableHolding {
+                security: *index,
+                date: formation,
+            })?;
+        total = total
+            .checked_add(cap)
+            .ok_or_else(|| EngineError::math("summing the held market caps"))?;
+        caps.push((*index, cap));
+    }
+    if total <= Decimal::ZERO {
+        return Err(EngineError::math("normalising by a non-positive total cap"));
+    }
+
+    caps.into_iter()
+        .map(|(index, cap)| {
+            cap.checked_div(total)
+                .map(|weight| (index, weight))
+                .ok_or_else(|| EngineError::math("normalising a market cap weight"))
+        })
+        .collect()
+}
+
+/// The weights `indices` are held at, under whichever rule the run is
+/// configured with.
+///
+/// One chokepoint rather than a match at each call site. The strategy loop and
+/// the buy-and-hold baseline both form a portfolio, and a weighting applied to
+/// one and not the other would leave the baseline beating the strategy on
+/// construction rather than on selection.
+pub fn weights_at(
+    panel: &Panel,
+    weighting: Weighting,
+    indices: &[usize],
+    formation: Date,
+) -> Result<Weights, EngineError> {
+    match weighting {
+        Weighting::Equal => equal_weight(indices),
+        Weighting::ValueByMarketcap => value_weight(panel, indices, formation),
+    }
 }
 
 /// Notional traded to move from one set of weights to another, as a fraction of

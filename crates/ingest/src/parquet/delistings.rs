@@ -3,9 +3,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use ::parquet::file::reader::ChunkReader;
 use arrow::array::{ArrayRef, Date32Array, Decimal128Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use rust_decimal::Decimal;
 
 use super::CurateError;
@@ -267,8 +269,23 @@ pub fn delistings_provenance(path: &Path) -> Result<DelistingProvenance, CurateE
 /// millions, and a file that does not say so is a file whose column cannot be
 /// used by anything except this crate.
 pub fn read_delistings(path: &Path) -> Result<Vec<Delisting>, CurateError> {
-    let file = super::open(path)?;
-    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+    decode(super::open(path)?)
+}
+
+/// The same read, from bytes already in memory.
+///
+/// Exists so a caller can hash a file and parse it from one `read`. See
+/// the `read_*_from_bytes` section of [`super`] for why a second read of the
+/// same path is a correctness problem rather than a performance one.
+pub fn read_delistings_from_bytes(bytes: Bytes) -> Result<Vec<Delisting>, CurateError> {
+    decode(bytes)
+}
+
+/// The body both entry points share, so neither can validate less than the
+/// other. In particular the units and source check below runs before a row is
+/// decoded on both paths.
+fn decode<R: ChunkReader + 'static>(source: R) -> Result<Vec<Delisting>, CurateError> {
+    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(source)?;
     super::units_and_source(
         DATASET,
         UNITS,

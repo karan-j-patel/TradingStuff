@@ -28,6 +28,22 @@
 //! Three columns, shared by every curated dataset: `ticker`,
 //! `permanent_id_kind`, and `permanent_id`. See [`codec::Identity`] for why
 //! identity is not flattened into a single string.
+//!
+//! # Why every dataset has a `read_*_from_bytes` beside its `read_*`
+//! <a name="read_from_bytes"></a>
+//!
+//! A caller that records a file's SHA-256 in a trial and then reads that file's
+//! records is making a claim: these numbers came from the bytes under that
+//! digest. Hashing one `read` and parsing a second `read` of the same path does
+//! not support the claim. Between the two reads the file can be replaced, by a
+//! concurrent refetch or by a hand, and the run then produces results from data
+//! B under a hash recording data A. Nothing downstream can detect it, because
+//! the digest is the only description of the input the trial log keeps.
+//!
+//! So the bytes are read once and both the digest and the records come from
+//! that one buffer. The path-based readers are unchanged in behaviour and
+//! delegate to the same body, which is what keeps the metadata and provenance
+//! checks identical on both routes rather than merely intended to be.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -47,13 +63,15 @@ mod prices;
 #[cfg(test)]
 mod tests;
 
-pub use actions::{read_actions, write_actions};
+pub use actions::{read_actions, read_actions_from_bytes, write_actions};
 pub use delistings::{
-    DelistingProvenance, delistings_provenance, read_delistings, write_delistings,
+    DelistingProvenance, delistings_provenance, read_delistings, read_delistings_from_bytes,
+    write_delistings,
 };
 pub use error::CurateError;
 pub use marketcap::{
-    MarketCapProvenance, UNITS, UNITS_KEY, marketcap_provenance, read_marketcap, write_marketcap,
+    MarketCapProvenance, UNITS, UNITS_KEY, marketcap_provenance, read_marketcap,
+    read_marketcap_from_bytes, write_marketcap,
 };
 pub use prices::{
     BASIS, BASIS_KEY, Provenance, SOURCE_KEY, prices_provenance, read_prices, write_prices,

@@ -41,7 +41,8 @@ fn e6_buy_and_hold_matches_hand_math() {
         "buy-and-hold must hold the whole eligible universe"
     );
 
-    let held = baseline::buy_and_hold(&panel, &config, &rebalances).expect("baseline runs");
+    let held = baseline::buy_and_hold(&panel, &config, &rebalances, config.weighting)
+        .expect("baseline runs");
     assert_eq!(
         held.net_monthly,
         vec![dec("0.998"), dec("1.0"), dec("0.998")]

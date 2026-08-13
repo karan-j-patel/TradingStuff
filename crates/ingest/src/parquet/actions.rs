@@ -9,9 +9,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use ::parquet::file::reader::ChunkReader;
 use arrow::array::{ArrayRef, Date32Array, Decimal128Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use rust_decimal::Decimal;
 
 use super::CurateError;
@@ -255,9 +257,23 @@ fn decimals(values: Vec<Option<i128>>) -> Result<ArrayRef, CurateError> {
 
 /// Read every action back, in the order the file holds them.
 pub fn read_actions(path: &Path) -> Result<Vec<ActionRecord>, CurateError> {
-    let file = super::open(path)?;
-    let reader =
-        ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    decode(super::open(path)?)
+}
+
+/// The same read, from bytes already in memory.
+///
+/// Exists so a caller can hash a file and parse it from one `read`. See
+/// the `read_*_from_bytes` section of [`super`] for why a second read of the
+/// same path is a correctness problem rather than a performance one.
+pub fn read_actions_from_bytes(bytes: Bytes) -> Result<Vec<ActionRecord>, CurateError> {
+    decode(bytes)
+}
+
+/// The body both entry points share, so neither can validate less than the
+/// other.
+fn decode<R: ChunkReader + 'static>(source: R) -> Result<Vec<ActionRecord>, CurateError> {
+    let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(source)?
+        .build()?;
 
     let mut records = Vec::new();
     let mut offset = 0usize;
