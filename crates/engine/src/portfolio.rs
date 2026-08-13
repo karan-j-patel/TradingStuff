@@ -171,9 +171,27 @@ pub fn advance(
             .get(*index)
             .ok_or_else(|| EngineError::math("looking up a held security"))?;
 
-        let open = series
-            .close_on(from)
-            .ok_or_else(|| EngineError::math("pricing a holding at the rebalance it was bought"))?;
+        // No bar on the month this mark opens means the holding already stopped
+        // trading earlier in this holding period and was marked out then. It is
+        // carried flat at that mark until the next formation sells it, which is
+        // what happens to a holder of a delisted name: there is nothing to sell
+        // it into, so the position sits at the last print. Its return is zero
+        // and its exit is not counted again, having been counted the month the
+        // bar first went missing.
+        //
+        // Only reachable when formations are further apart than the marks. On a
+        // monthly stride every holding was chosen at `from` and therefore has a
+        // bar there, which is what keeps those runs byte-identical to the code
+        // from before the stride existed.
+        let Some(open) = series.close_on(from) else {
+            if series.last_close_on_or_before(from).is_none() {
+                return Err(EngineError::math(
+                    "pricing a holding at the rebalance it was bought",
+                ));
+            }
+            returns.push((*index, Decimal::ZERO));
+            continue;
+        };
 
         let close = match series.close_on(to) {
             Some(close) => close,

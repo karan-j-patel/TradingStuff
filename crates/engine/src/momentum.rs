@@ -49,20 +49,54 @@ use crate::liquidity;
 use crate::lowvol;
 use crate::panel::Panel;
 
+/// How many names each stage of a formation removed.
+///
+/// Reported per formation rather than summed, because the question a reader has
+/// is where the cross-section went, and a total cannot answer it. Stages a
+/// strategy does not have are zero: momentum runs no size screen and forms no
+/// volatility half, so those counts stay at zero for it rather than being made
+/// up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FormationCensus {
+    /// Names clearing every rule that does not depend on a ranking.
+    pub eligible: usize,
+    /// Names the size screen removed from that set.
+    pub size_screened: usize,
+    /// Names kept by the low-volatility half.
+    pub vol_half: usize,
+    /// Names inside that half whose net payout yield or momentum could not be
+    /// computed, and which were therefore dropped before the ranking.
+    pub npy_ineligible: usize,
+    /// Names actually held.
+    pub held: usize,
+}
+
 /// What one rebalance date decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rebalance {
     pub date: Date,
+    /// Where `date` sits in `Panel::month_ends`. Carried so the holding loop
+    /// can walk the month-ends between two formations, which is what keeps the
+    /// marks monthly when the formations are quarterly.
+    pub index: usize,
     /// Indices into `Panel::securities`, ascending, which is identity order.
+    /// This is the set after any screen that removes names from the field the
+    /// portfolio is chosen out of, which is what the buy-and-hold baseline
+    /// holds.
     pub eligible: Vec<usize>,
     /// The held quintile, best first, where "best" is whichever end of the
     /// ranking the configured strategy takes.
     pub chosen: Vec<usize>,
-    /// Signal per eligible name, in `eligible` order. Kept so a test can assert
-    /// on the ranking rather than only on what came out the other end. Under
+    /// Signal per ranked name. For the two scalar strategies this is in
+    /// `eligible` order and holds the signal itself, and under
     /// [`Strategy::LowVolatility`] the value is the trailing volatility rather
-    /// than a return, and a smaller one is better.
+    /// than a return, where a smaller one is better. Under
+    /// [`Strategy::ConservativeFormula`] it holds the averaged rank for the
+    /// names that reached the ranking, which is a subset of `eligible`, and a
+    /// smaller one is better there too.
     pub signals: Vec<(usize, Decimal)>,
+    /// Where the cross-section went at this formation.
+    pub census: FormationCensus,
 }
 
 /// The momentum signal for one security at one rebalance.
@@ -91,16 +125,20 @@ pub fn signal(
 /// `index` is a position in `panel.month_ends()`. It must be at least
 /// `config.required_lead_in()`, which the caller guarantees by where it starts
 /// the loop.
-pub fn rebalance_at(
+/// The names that clear every rule which does not depend on a ranking, in
+/// identity order.
+///
+/// Extracted rather than written twice because the conservative formula applies
+/// the identical three rules over a longer window, and a coverage denominator
+/// or a price floor that drifted between two copies would be invisible from
+/// either one.
+pub(crate) fn tradable(
     panel: &Panel,
     config: &BacktestConfig,
-    index: usize,
-) -> Result<Rebalance, EngineError> {
-    let month_ends = panel.month_ends();
-    let date = month_ends[index];
-    let window_start = month_ends[index - config.signal_lookback_months];
-    let window_end = month_ends[index - config.signal_skip_months];
-
+    date: Date,
+    window_start: Date,
+    window_end: Date,
+) -> Result<Vec<usize>, EngineError> {
     // Denominator of the coverage rule: days the market was open across the
     // lead-in window, not days this particular name traded.
     let open_days = panel.trading_days_in(window_start, window_end);
@@ -110,8 +148,7 @@ pub fn rebalance_at(
         .ok_or_else(|| EngineError::math("sizing the coverage requirement"))?
         .ceil();
 
-    let mut eligible = Vec::new();
-    let mut signals = Vec::new();
+    let mut kept = Vec::new();
     for (position, series) in panel.securities().iter().enumerate() {
         // A name must have traded on the rebalance date. Without that there is
         // no price to buy at, and imputing one is inventing a fill.
@@ -124,10 +161,40 @@ pub fn rebalance_at(
         if Decimal::from(series.bars_in(window_start, window_end)) < required_days {
             continue;
         }
+        kept.push(position);
+    }
+    Ok(kept)
+}
+
+pub fn rebalance_at(
+    panel: &Panel,
+    config: &BacktestConfig,
+    index: usize,
+) -> Result<Rebalance, EngineError> {
+    // The composite owns its selection, so it leaves here before anything below
+    // runs. It is not a sort on one scalar, and the two matches further down
+    // have nothing to put in a conservative arm for that reason.
+    if config.strategy == Strategy::ConservativeFormula {
+        return crate::conservative::rebalance_at(panel, config, index);
+    }
+
+    let month_ends = panel.month_ends();
+    let date = month_ends[index];
+    let window_start = month_ends[index - config.signal_lookback_months];
+    let window_end = month_ends[index - config.signal_skip_months];
+
+    let mut eligible = Vec::new();
+    let mut signals = Vec::new();
+    for position in tradable(panel, config, date, window_start, window_end)? {
         let value = match config.strategy {
             Strategy::Momentum => signal(panel, position, window_start, window_end),
             Strategy::LowVolatility => {
                 lowvol::volatility(panel, position, window_start, window_end)
+            }
+            // Returned at the top of this function. The arm exists because the
+            // compiler cannot see that, and it never runs.
+            Strategy::ConservativeFormula => {
+                unreachable!("the conservative formula selects through its own module")
             }
         };
         let Some(value) = value else {
@@ -181,22 +248,33 @@ pub fn rebalance_at(
         Strategy::LowVolatility => {
             ranked.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(&right.0)));
         }
+        // Returned at the top of this function, same as the match above.
+        Strategy::ConservativeFormula => {
+            unreachable!("the conservative formula selects through its own module")
+        }
     }
 
     // Integer division floors, so 9 eligible names give a quintile of 1 rather
     // than 2. The floor of 1 keeps a thin month holding something rather than
     // silently sitting in cash, and thin months are counted and reported.
     let quintile = (ranked.len() / config.quintile_divisor).max(1);
-    let chosen = ranked
+    let chosen: Vec<usize> = ranked
         .iter()
         .take(quintile)
         .map(|(position, _)| *position)
         .collect();
 
+    let census = FormationCensus {
+        eligible: eligible.len(),
+        held: chosen.len(),
+        ..FormationCensus::default()
+    };
     Ok(Rebalance {
         date,
+        index,
         eligible,
         chosen,
         signals,
+        census,
     })
 }

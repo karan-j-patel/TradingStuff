@@ -127,20 +127,44 @@ pub fn screened(
         }
     }
 
-    // Thinnest first, ties on identity order. `sort` on a tuple compares the
+    drop_smallest(fraction, ranked, "sizing the liquidity exclusion")
+}
+
+/// The names left after `floor(len * fraction)` of them are dropped from the
+/// small end of `ranked`, returned in identity order.
+///
+/// Shared by the liquidity screen and by the conservative formula's size
+/// screen, because the two differ only in what they rank on. The floor is the
+/// part worth having in one place: at four names and a fifth removed,
+/// `floor(0.8)` is zero and the month keeps everything rather than losing a
+/// name it could not afford to lose. Rounding up instead would remove a quarter
+/// of a four-name cross-section rather than a fifth, and a rule that drifted
+/// between two copies would be invisible.
+///
+/// `context` names the arithmetic in an overflow message, since a reader
+/// chasing one down needs to know which screen produced it.
+///
+/// The fraction is validated by the caller, which is what lets each screen
+/// refuse with an error naming its own field rather than the other one's.
+pub(crate) fn drop_smallest(
+    fraction: Decimal,
+    mut ranked: Vec<(Decimal, usize)>,
+    context: &'static str,
+) -> Result<Vec<usize>, EngineError> {
+    // Smallest first, ties on identity order. `sort` on a tuple compares the
     // first element and falls through to the second, which is exactly the
     // tie-break wanted, so no comparator is needed.
     ranked.sort();
 
     let excluded = Decimal::from(ranked.len())
         .checked_mul(fraction)
-        .ok_or_else(|| EngineError::math("sizing the liquidity exclusion"))?
+        .ok_or(EngineError::Arithmetic { context })?
         .floor()
         .to_usize()
-        .ok_or_else(|| EngineError::math("counting the liquidity exclusion"))?;
+        .ok_or(EngineError::Arithmetic { context })?;
 
-    // Back to identity order. The caller filters two parallel vectors against
-    // this, and both of them are in identity order.
+    // Back to identity order. The caller filters parallel vectors against this,
+    // and all of them are in identity order.
     let mut kept: Vec<usize> = ranked
         .into_iter()
         .skip(excluded)

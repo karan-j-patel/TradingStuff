@@ -94,6 +94,12 @@ enum Command {
         /// imputes is a different trial from one that does not
         #[arg(long, requires = "prices")]
         delistings: Option<PathBuf>,
+        /// Curated market cap Parquet. Its figures rank the universe by size
+        /// and, divided by the adjusted close, carry the share-count leg of
+        /// net payout yield. Its SHA-256 goes into the configuration hash, so
+        /// a run against a refetched file is a different trial
+        #[arg(long, requires = "prices")]
+        marketcap: Option<PathBuf>,
     },
 
     /// Report which data providers this machine is configured for
@@ -128,6 +134,7 @@ fn main() -> ExitCode {
             universe,
             actions,
             delistings,
+            marketcap,
         } => backtest::Strategy::from_args(
             config.as_deref(),
             variant.as_deref(),
@@ -135,6 +142,7 @@ fn main() -> ExitCode {
             universe.as_ref(),
             actions.as_ref(),
             delistings.as_ref(),
+            marketcap.as_ref(),
         )
         .and_then(|strategy| backtest::run(&trials, &program, variant.as_deref(), &strategy)),
         Command::Ingest { action } => ingest::run(action.as_ref()),

@@ -11,8 +11,9 @@
 //! that is left out of the canonical form is not possible, because the
 //! canonical form is built from the serialisation rather than written by hand.
 //!
-//! The defaults are in [`BacktestConfig::momentum_v0`] and
-//! [`BacktestConfig::lowvol_v0`], one per research program.
+//! The defaults are in [`BacktestConfig::momentum_v0`],
+//! [`BacktestConfig::lowvol_v0`] and [`BacktestConfig::conservative_v0`], one
+//! per research program.
 
 use std::collections::BTreeMap;
 
@@ -32,6 +33,16 @@ pub const PROGRAM: &str = "momentum-v0";
 /// predicts returns. Filing them together would make each one's scoped N look
 /// like the other's search had been spent on it.
 pub const LOWVOL_PROGRAM: &str = "lowvol-v0";
+
+/// The research program identifier the conservative-formula configuration
+/// belongs to.
+///
+/// A third program rather than a variant of either of the first two, on the
+/// same rule [`LOWVOL_PROGRAM`] is filed under. Van Vliet and Blitz's
+/// conservative formula is a composite of low volatility, momentum and net
+/// payout yield, which is a different hypothesis about what predicts returns
+/// from either leg on its own, so it carries its own scoped `N`.
+pub const CONSERVATIVE_PROGRAM: &str = "conservative-v0";
 
 /// The variant of [`LOWVOL_PROGRAM`] that raises the price floor to $10.
 pub const VARIANT_PRICE_FLOOR_10: &str = "price-floor-10";
@@ -73,6 +84,7 @@ pub const RUNNABLE: &[(&str, Option<&str>)] = &[
     (LOWVOL_PROGRAM, None),
     (LOWVOL_PROGRAM, Some(VARIANT_PRICE_FLOOR_10)),
     (LOWVOL_PROGRAM, Some(VARIANT_LIQUIDITY_SCREENED)),
+    (CONSERVATIVE_PROGRAM, None),
 ];
 
 /// Which signal decides what is held.
@@ -89,8 +101,8 @@ pub const RUNNABLE: &[(&str, Option<&str>)] = &[
 /// Serialised as a snake_case string, so the canonical form carries
 /// `"strategy":"momentum"` or `"strategy":"low_volatility"` rather than an
 /// object, matching the case of every other token in the canonical form.
-/// `Copy` because it is a two-variant tag and threading a borrow of it
-/// through the rebalance loop would buy nothing.
+/// `Copy` because it is a small tag and threading a borrow of it through the
+/// rebalance loop would buy nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Strategy {
@@ -99,6 +111,18 @@ pub enum Strategy {
     /// Hold the LOWEST quintile by the sample standard deviation of daily
     /// returns over the formation window.
     LowVolatility,
+    /// Van Vliet and Blitz's conservative formula: inside the low-volatility
+    /// half of the large half of the universe, rank on 12-1 momentum and on net
+    /// payout yield, average the two ranks, and hold the best.
+    ///
+    /// # Why this one does not fit the sort-then-slice shape
+    ///
+    /// The other two strategies score each name with one number and take an end
+    /// of the ranking. This one has no single scalar: the composite is the mean
+    /// of two *ranks*, and a rank is a property of the whole cross-section
+    /// rather than of a name. So the conservative arm owns its selection path
+    /// instead of the two being forced into one shape prematurely.
+    ConservativeFormula,
 }
 
 /// One configuration of the backtest.
@@ -244,6 +268,58 @@ pub struct BacktestConfig {
     /// over-counting trials when a refetch changes a byte without changing what
     /// the run sees, which is the safe way round.
     pub delistings_sha256: Option<String>,
+
+    /// SHA-256 of the market cap file, when one was supplied.
+    ///
+    /// Same rules as [`BacktestConfig::delistings_sha256`], and it exists for
+    /// the same reason. The market caps decide both the size screen and the
+    /// share-count leg of net payout yield, so a refetch that fills in one more
+    /// month-end changes which names were held under an identical rule. Without
+    /// this field the two runs record as one trial.
+    pub marketcap_sha256: Option<String>,
+
+    /// Months between formations. One re-forms the portfolio every month-end;
+    /// three is the quarterly schedule the conservative formula's source
+    /// specifies.
+    ///
+    /// # Why the marks stay monthly whatever this is
+    ///
+    /// The stride moves the *formation* dates only. The portfolio is still
+    /// marked at every month-end in between, so [`crate::run::Series`]'s
+    /// `net_monthly` really is monthly and the `sqrt(12)` in
+    /// [`crate::portfolio::annualisation_factor`] stays correct. A stride that
+    /// also coarsened the marks would leave a quarterly series annualised as
+    /// though it were monthly, which inflates the Sharpe by `sqrt(3)` with
+    /// nothing visibly failing.
+    pub rebalance_every_months: usize,
+
+    /// Months of month-end history the conservative formula's volatility
+    /// estimate spans. Thirty-six, from the source paper.
+    ///
+    /// `None` for a strategy that has no such window, which is every program
+    /// except the conservative one. Optional rather than zero for the reason
+    /// [`BacktestConfig::liquidity_floor_fraction`] gives: whether a window
+    /// exists at all and how long it is are two different questions.
+    pub volatility_lookback_months: Option<usize>,
+
+    /// Month-end observations the net payout yield's share ratio averages over,
+    /// ending at the month before the formation. Twenty-four, from the source.
+    pub payout_share_average_months: Option<usize>,
+
+    /// Months of trailing cash dividends the net payout yield's dividend leg
+    /// sums. Twelve, from the ruling that fixed the window the source leaves
+    /// unsaid.
+    pub payout_dividend_trailing_months: Option<usize>,
+
+    /// Fraction of the otherwise-eligible names to drop at each formation, from
+    /// the small end of a ranking on market capitalisation at the formation
+    /// date.
+    ///
+    /// A half, standing in for the source's "the 1,000 largest stocks". The
+    /// universe here is a deterministic sample rather than the whole market, so
+    /// the count is not transferable and the proportion is preserved instead.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub size_floor_fraction: Option<Decimal>,
 }
 
 impl BacktestConfig {
@@ -291,6 +367,7 @@ impl BacktestConfig {
                 liquidity_floor_fraction: Some(Decimal::new(2, 1)),
                 ..Self::lowvol_v0(universe_sha256)
             }),
+            (CONSERVATIVE_PROGRAM, None) => Some(Self::conservative_v0(universe_sha256)),
             // Listed in the registry with nothing to build. Unreachable while
             // the two agree, and the registry walk in the CLI tests is what
             // notices when they stop agreeing.
@@ -320,6 +397,12 @@ impl BacktestConfig {
             actions_sha256: None,
             delisting_convention: None,
             delistings_sha256: None,
+            marketcap_sha256: None,
+            rebalance_every_months: 1,
+            volatility_lookback_months: None,
+            payout_share_average_months: None,
+            payout_dividend_trailing_months: None,
+            size_floor_fraction: None,
         }
     }
 
@@ -337,13 +420,46 @@ impl BacktestConfig {
         }
     }
 
+    /// The conservative-formula configuration.
+    ///
+    /// Every figure here comes from van Vliet and Blitz (2018) or from a ruling
+    /// fixed before any result existed, and none of them is swept. The two that
+    /// differ from the momentum defaults for a reason worth stating:
+    ///
+    /// `price_floor` is zero because the source has no price floor and its size
+    /// screen does the liquidity work. `liquidity_floor_fraction` is `None` for
+    /// the same reason. `min_coverage` stays at 0.80, because that is this
+    /// project's data-quality rule rather than a strategy parameter, and it is
+    /// what guards a thirty-six-month volatility estimate against sparse bars.
+    pub fn conservative_v0(universe_sha256: impl Into<String>) -> Self {
+        Self {
+            strategy: Strategy::ConservativeFormula,
+            price_floor: Decimal::ZERO,
+            liquidity_floor_fraction: None,
+            rebalance_every_months: 3,
+            volatility_lookback_months: Some(36),
+            payout_share_average_months: Some(24),
+            payout_dividend_trailing_months: Some(12),
+            // 0.5, written as `5 * 10^-1` so the scale is explicit.
+            size_floor_fraction: Some(Decimal::new(5, 1)),
+            ..Self::momentum_v0(universe_sha256)
+        }
+    }
+
     /// How many month-ends of history a rebalance needs before it can happen.
     ///
-    /// The signal reads the close at the end of month `t - lookback` and the
-    /// close at the end of month `t - skip`, so the rebalance at month index
-    /// `i` needs `i >= lookback`.
+    /// The momentum signal reads the close at the end of month `t - lookback`
+    /// and the close at the end of month `t - skip`, so a rebalance at month
+    /// index `i` needs `i >= lookback`. The conservative formula reads three
+    /// windows further back than that, and the deepest of the four is what the
+    /// loop has to wait for: a lead-in short enough for one leg and too short
+    /// for another would silently drop every name at the early formations
+    /// rather than refusing to form them.
     pub fn required_lead_in(&self) -> usize {
         self.signal_lookback_months
+            .max(self.volatility_lookback_months.unwrap_or(0))
+            .max(self.payout_share_average_months.unwrap_or(0))
+            .max(self.payout_dividend_trailing_months.unwrap_or(0))
     }
 
     /// The exact bytes the configuration hash is taken over.
@@ -362,6 +478,9 @@ impl BacktestConfig {
             cost_per_side: self.cost_per_side.normalize(),
             liquidity_floor_fraction: self
                 .liquidity_floor_fraction
+                .map(|fraction| fraction.normalize()),
+            size_floor_fraction: self
+                .size_floor_fraction
                 .map(|fraction| fraction.normalize()),
             ..self.clone()
         };

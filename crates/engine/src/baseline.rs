@@ -29,6 +29,37 @@ use crate::portfolio::{self, Weights};
 pub const LINEAR_BASELINE_NOTE: &str =
     "The linear-model baseline degenerates to the signal itself with one feature.";
 
+/// What is printed in the same place for the conservative formula.
+///
+/// The composite is already a linear model: an equal-weight sum of two ranks
+/// with nothing fitted and no free parameter to estimate. So a linear baseline
+/// on those same two features is the strategy, and printing it as a comparison
+/// would be printing the strategy twice.
+///
+/// What that does not cover is a *fitted* linear model, which is a different
+/// question and a real gap. Ridge regression over the same features arrives at
+/// milestone 6, and until it does the note names the gap rather than implying
+/// rule 5 has been satisfied in full.
+pub const LINEAR_BASELINE_NOTE_CONSERVATIVE: &str = "The strategy is itself a linear model of its features, an equal-weight average of \
+     two ranks with nothing fitted, so an unfitted linear baseline is the strategy. A \
+     FITTED linear baseline over the same features is not run here and joins at the ridge \
+     milestone; until then this comparison is missing rather than satisfied.";
+
+/// The note belonging to a strategy.
+///
+/// A function rather than a caller choosing, on the rule [`crate::run::caveats`]
+/// follows: the two notes make different claims about what has and has not been
+/// compared, and printing the wrong one beside a real figure would say rule 5
+/// was satisfied when it was not.
+pub fn linear_baseline_note(strategy: crate::config::Strategy) -> &'static str {
+    match strategy {
+        crate::config::Strategy::Momentum | crate::config::Strategy::LowVolatility => {
+            LINEAR_BASELINE_NOTE
+        }
+        crate::config::Strategy::ConservativeFormula => LINEAR_BASELINE_NOTE_CONSERVATIVE,
+    }
+}
+
 /// A baseline's monthly net series and what it came to.
 #[derive(Debug, Clone)]
 pub struct BaselineSeries {
@@ -64,22 +95,33 @@ impl BaselineSeries {
 /// then on, which is what actually happens to a buy-and-hold investor holding a
 /// name that delists: they are left with whatever the last print was and no
 /// position.
+///
+/// # Why the marks come from the panel rather than from the formation dates
+///
+/// The baseline is bought once, so the formation schedule tells it nothing. Its
+/// series has to be sampled at the same frequency as the strategy's or the two
+/// annualised Sharpes beside each other would be computed from returns of
+/// different lengths. Under a monthly stride the month-ends between the first
+/// and last formation are exactly the formation dates, so this is unchanged for
+/// every program that had one.
 pub fn buy_and_hold(
     panel: &Panel,
     config: &BacktestConfig,
     rebalances: &[Rebalance],
 ) -> Result<BaselineSeries, EngineError> {
+    let marks = &panel.month_ends()[rebalances[0].index..=rebalances[rebalances.len() - 1].index];
+
     let mut alive: Weights = portfolio::equal_weight(&rebalances[0].eligible)?;
     let mut cash = Decimal::ZERO;
-    let mut net_monthly = Vec::with_capacity(rebalances.len().saturating_sub(1));
+    let mut net_monthly = Vec::with_capacity(marks.len().saturating_sub(1));
 
     let entry_cost = config
         .cost_per_side
         .checked_mul(portfolio::traded_notional(&Weights::new(), &alive)?)
         .ok_or_else(|| EngineError::math("costing the buy-and-hold entry"))?;
 
-    for (position, pair) in rebalances.windows(2).enumerate() {
-        let (from, to) = (pair[0].date, pair[1].date);
+    for (position, pair) in marks.windows(2).enumerate() {
+        let (from, to) = (pair[0], pair[1]);
         let mut gross = Decimal::ZERO;
         let mut returns: BTreeMap<usize, (Decimal, bool)> = BTreeMap::new();
 

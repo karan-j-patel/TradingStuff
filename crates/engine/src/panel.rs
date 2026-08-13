@@ -26,6 +26,7 @@ use ingest::actions::{
     flat_convention_for,
 };
 use ingest::adjusted::AdjustedBar;
+use ingest::marketcap::MarketCapRecord;
 use ingest::schema::{AssetKey, PermanentId};
 use jiff::civil::Date;
 use rust_decimal::Decimal;
@@ -146,6 +147,14 @@ pub struct Series {
     /// Classified exits, ascending by date. Empty until
     /// [`Panel::with_delistings`] attaches any, on the same rule.
     exits: Vec<ClassifiedExit>,
+    /// Market capitalisations, ascending by date, at most one per date. Empty
+    /// until [`Panel::with_marketcaps`] attaches any, on the same rule again.
+    ///
+    /// Stored as the vendor ships the figure, which for the first provider is
+    /// millions of US dollars. Nothing here rescales it, and nothing needs to:
+    /// the only consumer divides one of these by another, so any constant
+    /// factor cancels. See [`Series::marketcap_at_month_end`].
+    marketcaps: Vec<(Date, Decimal)>,
 }
 
 impl Series {
@@ -347,6 +356,37 @@ impl Series {
             .collect()
     }
 
+    /// The market capitalisation last reported in the calendar month
+    /// `month_end` falls in, dated on or before `month_end`.
+    ///
+    /// The same reach-back rule [`Series::close_at_month_end`] uses, and for
+    /// the same reason: the vendor omits the row on a day it has no figure, and
+    /// a name whose last figure in the month is dated the 29th should not be
+    /// dropped for a month-end that landed on the 30th. Bounded to the calendar
+    /// month, so a name with a long gap has no figure rather than a stale one.
+    ///
+    /// # Units, and why they never matter here
+    ///
+    /// The figure is as shipped, which the first provider documents as millions
+    /// of dollars. The only consumer divides a market cap by a price to get a
+    /// quantity proportional to shares outstanding, and then divides one such
+    /// quantity by another, so the vendor's scale factor cancels twice over. No
+    /// absolute share count is ever formed, which is what keeps a units mistake
+    /// from being expressible.
+    pub fn marketcap_at_month_end(&self, month_end: Date) -> Option<Decimal> {
+        let index = match self
+            .marketcaps
+            .binary_search_by(|(date, _)| date.cmp(&month_end))
+        {
+            Ok(index) => index,
+            Err(0) => return None,
+            Err(index) => index - 1,
+        };
+        let (found, marketcap) = self.marketcaps[index];
+        (found.year() == month_end.year() && found.month() == month_end.month())
+            .then_some(marketcap)
+    }
+
     /// Every date this security has a bar on, for tests and diagnostics.
     pub fn dates(&self) -> impl Iterator<Item = Date> + '_ {
         self.bars.iter().map(|bar| bar.date)
@@ -375,6 +415,13 @@ pub struct Panel {
     delistings_attached: bool,
     /// Delisting records naming a security this panel does not hold.
     unmatched_delistings: usize,
+    /// Whether a market cap dataset was attached at all, which is a different
+    /// question from whether any figure matched. True after an attachment that
+    /// matched nothing, because the run still read a market cap file and its
+    /// configuration hash still says so.
+    marketcaps_attached: bool,
+    /// Market cap records naming a security this panel does not hold.
+    unmatched_marketcaps: usize,
 }
 
 impl Panel {
@@ -407,6 +454,7 @@ impl Panel {
                 bars: by_date.into_values().collect(),
                 dividends: Vec::new(),
                 exits: Vec::new(),
+                marketcaps: Vec::new(),
             })
             .collect();
 
@@ -431,6 +479,8 @@ impl Panel {
             non_cash_actions: 0,
             delistings_attached: false,
             unmatched_delistings: 0,
+            marketcaps_attached: false,
+            unmatched_marketcaps: 0,
         })
     }
 
@@ -490,6 +540,8 @@ impl Panel {
             month_ends,
             delistings_attached,
             unmatched_delistings,
+            marketcaps_attached,
+            unmatched_marketcaps,
             ..
         } = self;
 
@@ -526,6 +578,8 @@ impl Panel {
             non_cash_actions,
             delistings_attached,
             unmatched_delistings,
+            marketcaps_attached,
+            unmatched_marketcaps,
         })
     }
 
@@ -558,6 +612,8 @@ impl Panel {
             dividends_attached,
             unmatched_dividends,
             non_cash_actions,
+            marketcaps_attached,
+            unmatched_marketcaps,
             ..
         } = self;
 
@@ -591,6 +647,92 @@ impl Panel {
             non_cash_actions,
             delistings_attached: true,
             unmatched_delistings,
+            marketcaps_attached,
+            unmatched_marketcaps,
+        })
+    }
+
+    /// A new panel carrying the market capitalisations in `records`.
+    ///
+    /// Consumes and returns, exactly as the other two attachments do and for
+    /// the same reason. Attaching adds a series of figures and decides nothing:
+    /// which of them any strategy reads, and at which dates, belongs to the
+    /// strategy.
+    ///
+    /// # Why zero is kept and a negative is refused
+    ///
+    /// The provider quantises to one decimal place of a million dollars, so a
+    /// distressed company below that quantum legitimately arrives as exactly
+    /// zero. That is a value, not a gap, and dropping it here would hide it
+    /// from the consumer whose job is to notice it. A negative market cap is
+    /// not a small company, so it is refused loudly the way a non-positive
+    /// dividend is: this table expresses a missing figure by omitting the row,
+    /// which makes a silently dropped corrupt row indistinguishable from the
+    /// absence that happens all the time.
+    pub fn with_marketcaps(self, records: &[MarketCapRecord]) -> Result<Panel, EngineError> {
+        let mut by_identity: BTreeMap<String, Vec<(Date, Decimal)>> = BTreeMap::new();
+        for record in records {
+            if record.marketcap < Decimal::ZERO {
+                return Err(EngineError::NegativeMarketcap {
+                    ticker: record.asset.ticker.clone(),
+                    date: record.date,
+                    marketcap: record.marketcap,
+                });
+            }
+            by_identity
+                .entry(identity(&record.asset))
+                .or_default()
+                .push((record.date, record.marketcap));
+        }
+
+        // Destructured for the reason the other two attachments are: `..self`
+        // cannot follow a move out of `self.securities`.
+        let Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_attached,
+            unmatched_dividends,
+            non_cash_actions,
+            delistings_attached,
+            unmatched_delistings,
+            ..
+        } = self;
+
+        let mut unmatched_marketcaps = 0usize;
+        let securities: Vec<Series> = securities
+            .into_iter()
+            .map(|series| {
+                let mut marketcaps = by_identity.remove(&series.identity).unwrap_or_default();
+                // Ascending by date, because the lookup is a binary search and
+                // a fixture that happened to supply them sorted would otherwise
+                // be the only reason that held. Duplicates on one date keep
+                // whichever sorts last, matching how the bar grouping collapses
+                // a vendor shipping a row twice.
+                marketcaps.sort_by_key(|(date, _)| *date);
+                marketcaps.dedup_by_key(|(date, _)| *date);
+                Series {
+                    marketcaps,
+                    ..series
+                }
+            })
+            .collect();
+
+        for leftover in by_identity.values() {
+            unmatched_marketcaps += leftover.len();
+        }
+
+        Ok(Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_attached,
+            unmatched_dividends,
+            non_cash_actions,
+            delistings_attached,
+            unmatched_delistings,
+            marketcaps_attached: true,
+            unmatched_marketcaps,
         })
     }
 
@@ -621,6 +763,16 @@ impl Panel {
     /// Delisting records naming a security outside this panel.
     pub fn unmatched_delistings(&self) -> usize {
         self.unmatched_delistings
+    }
+
+    /// Whether a market cap file was attached, however little of it matched.
+    pub fn marketcaps_attached(&self) -> bool {
+        self.marketcaps_attached
+    }
+
+    /// Market cap records naming a security outside this panel.
+    pub fn unmatched_marketcaps(&self) -> usize {
+        self.unmatched_marketcaps
     }
 
     /// Last trading day of each calendar month present, ascending.

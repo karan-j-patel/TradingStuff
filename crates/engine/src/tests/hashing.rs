@@ -100,6 +100,43 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
             delistings_sha256: Some("1".repeat(64)),
             ..base.clone()
         },
+        // Which market caps the size screen ranked on and the payout leg
+        // divided by is a property of the file. A refetch that fills in one
+        // more month-end moves which names were held under an identical rule,
+        // so the file has to reach the hash on its own.
+        BacktestConfig {
+            marketcap_sha256: Some("1".repeat(64)),
+            ..base.clone()
+        },
+        // A quarterly schedule and a monthly one over the same signal are two
+        // strategies, not one measured twice: they hold different names for
+        // different lengths of time and pay different costs to do it.
+        BacktestConfig {
+            rebalance_every_months: 3,
+            ..base.clone()
+        },
+        // Each window below is a parameter the source fixes and this project
+        // refuses to sweep. A sweep would be one trial per point, and a sweep
+        // whose points shared a hash would be one trial recorded for all of
+        // them, which is the failure rule 2 exists to prevent.
+        BacktestConfig {
+            volatility_lookback_months: Some(36),
+            ..base.clone()
+        },
+        BacktestConfig {
+            payout_share_average_months: Some(24),
+            ..base.clone()
+        },
+        BacktestConfig {
+            payout_dividend_trailing_months: Some(12),
+            ..base.clone()
+        },
+        // Engaging the size screen changes which names the ranking sees, on the
+        // same rule the liquidity screen is covered under.
+        BacktestConfig {
+            size_floor_fraction: Some(rust_decimal::Decimal::new(5, 1)),
+            ..base.clone()
+        },
     ];
 
     // One mutation per field. If the struct grows a field, this count is the

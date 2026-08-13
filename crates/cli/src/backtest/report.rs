@@ -81,10 +81,7 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
         report.first_rebalance, report.last_rebalance, report.months
     );
     println!("  universe file sha256:  {}", report.config.universe_sha256);
-    println!(
-        "  eligible names:        {} to {} per rebalance",
-        report.eligible_min, report.eligible_max
-    );
+    println!("{}", census_block(report));
     println!();
 
     println!("Result, net of costs. Rule 1: a Sharpe is a diagnostic, never performance.");
@@ -102,7 +99,12 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
     );
     println!("  max drawdown:            {}", show(report.max_drawdown));
     println!(
-        "  mean one-way turnover:   {}   per rebalance",
+        "  formations:              {}   every {} month(s)",
+        report.formations.len(),
+        report.config.rebalance_every_months
+    );
+    println!(
+        "  mean one-way turnover:   {}   per formation, single-counted",
         show(report.mean_one_way_turnover)
     );
     println!("{}", exit_block(report));
@@ -126,7 +128,7 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
     );
     println!(
         "  linear model:               {}",
-        engine::baseline::LINEAR_BASELINE_NOTE
+        engine::baseline::linear_baseline_note(report.config.strategy)
     );
     println!();
 
@@ -140,6 +142,55 @@ fn print_report(log: &TrialLog, program: &str, report: &Report, recorded: Option
     println!("Caveats, recorded with the result.");
     println!("  {}", caveat_block(report));
     println!();
+}
+
+/// Where the cross-section went, stage by stage, across every formation.
+///
+/// Reported as the range each stage spanned rather than as one line per
+/// formation. The question a reader has is whether the funnel behaved, and a
+/// hundred rows answers it no better than its two ends while burying the rest
+/// of the report. `Report::formations` carries every row for a caller that
+/// wants them.
+///
+/// Gated on the size screen, which only the conservative formula runs. On the
+/// other programs three of the five stages do not exist, and printing them as
+/// zeros would claim a screen ran and removed nothing.
+pub(super) fn census_block(report: &Report) -> String {
+    if report.config.size_floor_fraction.is_none() {
+        return format!(
+            "  eligible names:        {} to {} per rebalance",
+            report.eligible_min, report.eligible_max
+        );
+    }
+    let span = |stage: fn(&engine::FormationCensus) -> usize| {
+        let counts: Vec<usize> = report.formations.iter().map(stage).collect();
+        format!(
+            "{} to {}",
+            counts.iter().copied().min().unwrap_or(0),
+            counts.iter().copied().max().unwrap_or(0)
+        )
+    };
+    [
+        "  formation census, per formation, low to high".to_string(),
+        format!(
+            "    eligible:                  {}",
+            span(|row| row.eligible)
+        ),
+        format!(
+            "    removed by the size screen: {}",
+            span(|row| row.size_screened)
+        ),
+        format!(
+            "    kept by the calm half:      {}",
+            span(|row| row.vol_half)
+        ),
+        format!(
+            "    dropped, no payout yield:   {}",
+            span(|row| row.npy_ineligible)
+        ),
+        format!("    held:                       {}", span(|row| row.held)),
+    ]
+    .join("\n")
 }
 
 /// What the report says about held names that stopped trading.

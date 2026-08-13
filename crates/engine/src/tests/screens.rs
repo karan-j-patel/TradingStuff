@@ -22,7 +22,8 @@ use std::collections::BTreeSet;
 
 use super::{asset, bar, dec, lowvol_config, month_ends, panel_of};
 use crate::config::{
-    BacktestConfig, LOWVOL_PROGRAM, RUNNABLE, VARIANT_LIQUIDITY_SCREENED, VARIANT_PRICE_FLOOR_10,
+    BacktestConfig, CONSERVATIVE_PROGRAM, LOWVOL_PROGRAM, PROGRAM, RUNNABLE,
+    VARIANT_LIQUIDITY_SCREENED, VARIANT_PRICE_FLOOR_10,
 };
 use crate::liquidity;
 use crate::momentum;
@@ -412,15 +413,20 @@ fn e10f_the_ten_dollar_floor_excludes_what_the_base_admits() {
 /// while `--variant liquidity-screened` went on running from the command line
 /// untested. This is the test that fails on it.
 ///
-/// # Why the variant probes are written out rather than taken from the registry
+/// # Why the probes are written out rather than taken from the registry
 ///
 /// The first version of this test built its probe set from [`RUNNABLE`], and it
 /// was measured green under the very mutation it was written for. A probe set
 /// drawn from the registry can only ask about pairs the registry lists, which
 /// is the same blind spot `e10d` has, so it inherited the gap instead of
-/// closing it. The variant names below are therefore the constants this crate
-/// declares, which is what the door's match arms are written against, and the
-/// loop underneath refuses a registry entry naming a variant absent from them.
+/// closing it. The names below are therefore the constants this crate declares,
+/// which is what the door's match arms are written against, and the loops
+/// underneath refuse a registry entry naming a program or a variant absent from
+/// them.
+///
+/// Both halves of a pair are written out for the same reason. A program the
+/// door serves that the registry does not list is the identical failure one
+/// column over, and a walk over the registry's programs cannot see it either.
 ///
 /// What that leaves uncovered is a match arm added together with a constant and
 /// listed in neither place. That one is visible in the diff and nowhere else,
@@ -440,17 +446,28 @@ fn the_door_resolves_exactly_the_pairs_the_registry_lists() {
         Some(VARIANT_LIQUIDITY_SCREENED),
         Some("no-such-variant"),
     ];
+    let declared = [
+        PROGRAM,
+        LOWVOL_PROGRAM,
+        CONSERVATIVE_PROGRAM,
+        "no-such-program",
+    ];
     for (program, variant) in RUNNABLE {
         assert!(
             variants.contains(variant),
             "the registry lists {program} --variant {variant:?} and this test never \
              probes that variant, so the pair is covered in one direction only"
         );
+        assert!(
+            declared.contains(program),
+            "the registry lists {program} and this test never probes that program, \
+             so the pair is covered in one direction only"
+        );
     }
 
     // `BTreeSet` deduplicates and fixes the order, so a failure names the same
     // pair on every run.
-    let programs: BTreeSet<&str> = RUNNABLE.iter().map(|(program, _)| *program).collect();
+    let programs: BTreeSet<&str> = declared.into_iter().collect();
     for program in &programs {
         for variant in variants {
             let resolved = BacktestConfig::for_program(program, variant, &universe).is_some();

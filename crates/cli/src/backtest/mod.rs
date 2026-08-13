@@ -62,6 +62,9 @@ pub enum Strategy<'a> {
         actions: Option<&'a Path>,
         /// Curated delistings, which classify the exits the engine detects.
         delistings: Option<&'a Path>,
+        /// Curated market caps, which the size screen ranks on and which carry
+        /// the share-count leg of net payout yield.
+        marketcap: Option<&'a Path>,
     },
 }
 
@@ -77,6 +80,7 @@ impl<'a> Strategy<'a> {
         universe: Option<&'a PathBuf>,
         actions: Option<&'a PathBuf>,
         delistings: Option<&'a PathBuf>,
+        marketcap: Option<&'a PathBuf>,
     ) -> anyhow::Result<Self> {
         match (config, prices, universe) {
             // `--actions`, `--delistings` and `--variant` are refused here
@@ -94,10 +98,18 @@ impl<'a> Strategy<'a> {
             // `--config` conflicts with `--prices`, which suppresses the
             // requirement instead of failing on it.
             (Some(config), None, None)
-                if actions.is_none() && delistings.is_none() && variant.is_none() =>
+                if actions.is_none()
+                    && delistings.is_none()
+                    && marketcap.is_none()
+                    && variant.is_none() =>
             {
                 Ok(Strategy::Declared(config))
             }
+            (Some(_), None, None) if marketcap.is_some() => anyhow::bail!(
+                "--marketcap ranks the universe by size in an engine run, and --config \
+                 declares a configuration with no engine behind it, so the two cannot go \
+                 together"
+            ),
             (Some(_), None, None) if variant.is_some() => anyhow::bail!(
                 "--variant selects a robustness variant of a program the engine runs, and \
                  --config declares a configuration with no engine behind it, so the two \
@@ -117,6 +129,7 @@ impl<'a> Strategy<'a> {
                 universe: universe.as_path(),
                 actions: actions.map(PathBuf::as_path),
                 delistings: delistings.map(PathBuf::as_path),
+                marketcap: marketcap.map(PathBuf::as_path),
             }),
             _ => anyhow::bail!(
                 "give either --config, for a configuration with no engine behind it, or \
@@ -200,10 +213,20 @@ fn evaluate(
             universe,
             actions,
             delistings,
-        } => engine_run(program, variant, prices, universe, *actions, *delistings),
+            marketcap,
+        } => engine_run(
+            program,
+            variant,
+            prices,
+            universe,
+            *actions,
+            *delistings,
+            *marketcap,
+        ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn engine_run(
     program: &str,
     variant: Option<&str>,
@@ -211,6 +234,7 @@ fn engine_run(
     universe: &Path,
     actions: Option<&Path>,
     delistings: Option<&Path>,
+    marketcap: Option<&Path>,
 ) -> (ConfigHash, Outcome) {
     // Used only when the configuration itself cannot be resolved, which happens
     // when the universe file cannot be read or the program names no
@@ -228,16 +252,17 @@ fn engine_run(
         )
     };
 
-    let (config, members) = match resolve(program, variant, universe, actions, delistings) {
-        Ok(resolved) => resolved,
-        Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
-    };
+    let (config, members) =
+        match resolve(program, variant, universe, actions, delistings, marketcap) {
+            Ok(resolved) => resolved,
+            Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
+        };
     let config_hash = match config.config_hash() {
         Ok(hash) => hash,
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
 
-    match execute(prices, actions, delistings, &members, &config) {
+    match execute(prices, actions, delistings, marketcap, &members, &config) {
         Ok(report) => (config_hash, Outcome::Ran(Box::new(report))),
         Err(error) => (config_hash, Outcome::Failed(format!("{error:#}"))),
     }
@@ -268,6 +293,7 @@ fn resolve(
     universe: &Path,
     actions: Option<&Path>,
     delistings: Option<&Path>,
+    marketcap: Option<&Path>,
 ) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>)> {
     let text = std::fs::read_to_string(universe)
         .with_context(|| format!("reading the universe file {}", universe.display()))?;
@@ -291,6 +317,7 @@ fn resolve(
     };
     let actions_sha256 = hash_file(actions, "actions")?;
     let delistings_sha256 = hash_file(delistings, "delistings")?;
+    let marketcap_sha256 = hash_file(marketcap, "market cap")?;
 
     let config = BacktestConfig::for_program(program, variant, sha256).ok_or_else(|| {
         // Listed from the registry rather than written out, so a pair added
@@ -317,6 +344,7 @@ fn resolve(
             actions_sha256,
             delisting_convention: delistings.map(|_| engine::DELISTING_CONVENTION.to_string()),
             delistings_sha256,
+            marketcap_sha256,
             ..config
         },
         members,
@@ -327,6 +355,7 @@ fn execute(
     prices: &Path,
     actions: Option<&Path>,
     delistings: Option<&Path>,
+    marketcap: Option<&Path>,
     members: &HashSet<AssetKey>,
     config: &BacktestConfig,
 ) -> anyhow::Result<Report> {
@@ -402,6 +431,29 @@ fn execute(
             println!(
                 "  {} named a security outside the universe file",
                 panel.unmatched_delistings()
+            );
+            panel
+        }
+    };
+
+    // The third attachment, on the same rule as the first two. The engine
+    // refuses a panel whose market cap state disagrees with the configuration,
+    // and the conservative formula refuses to run without one at all.
+    let panel = match marketcap {
+        None => panel,
+        Some(path) => {
+            let records = ingest::parquet::read_marketcap(path)
+                .with_context(|| format!("reading curated market caps from {}", path.display()))?;
+            let read = records.len();
+            let panel = panel.with_marketcaps(&records)?;
+            println!("Read {read} market caps from {}.", path.display());
+            println!(
+                "  ranked by size at each formation, and divided by the adjusted close for \
+                 the share-count leg of net payout yield"
+            );
+            println!(
+                "  {} named a security outside the universe file",
+                panel.unmatched_marketcaps()
             );
             panel
         }

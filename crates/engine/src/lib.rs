@@ -30,6 +30,8 @@
 //! - [`momentum`] computes the momentum signal, applies the eligibility rules,
 //!   and forms the rebalance for whichever strategy is configured.
 //! - [`lowvol`] computes the low-volatility signal.
+//! - [`conservative`] computes the conservative formula's two legs and owns its
+//!   selection, which averages two ranks rather than sorting one scalar.
 //! - [`liquidity`] computes the tradability screen one variant applies.
 //! - [`portfolio`] turns weights and prices into returns, with costs.
 //! - [`baseline`] runs the comparisons rule 5 requires.
@@ -37,6 +39,7 @@
 
 pub mod baseline;
 pub mod config;
+pub mod conservative;
 pub mod error;
 pub mod liquidity;
 pub mod lowvol;
@@ -49,10 +52,11 @@ pub mod run;
 mod tests;
 
 pub use config::{
-    BacktestConfig, DELISTING_CONVENTION, LOWVOL_PROGRAM, PROGRAM, RUNNABLE, Strategy,
-    VARIANT_LIQUIDITY_SCREENED, VARIANT_PRICE_FLOOR_10,
+    BacktestConfig, CONSERVATIVE_PROGRAM, DELISTING_CONVENTION, LOWVOL_PROGRAM, PROGRAM, RUNNABLE,
+    Strategy, VARIANT_LIQUIDITY_SCREENED, VARIANT_PRICE_FLOOR_10,
 };
 pub use error::EngineError;
+pub use momentum::FormationCensus;
 pub use panel::{ExitMark, Panel};
 pub use portfolio::ExitCensus;
 pub use run::{

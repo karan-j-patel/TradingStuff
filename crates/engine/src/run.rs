@@ -17,9 +17,9 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 
 use crate::baseline::{self, BaselineSeries, RandomBaseline, SplitMix64};
-use crate::config::BacktestConfig;
+use crate::config::{BacktestConfig, Strategy};
 use crate::error::EngineError;
-use crate::momentum::{self, Rebalance};
+use crate::momentum::{self, FormationCensus, Rebalance};
 use crate::panel::Panel;
 use crate::portfolio::{self, ExitCensus, Weights};
 
@@ -139,26 +139,39 @@ pub struct Series {
 /// names to hold. `FnMut` rather than `Fn` because the random baseline carries
 /// a generator state across rebalances, and a stream that restarted each month
 /// would not be the draw it claims to be.
+/// # Why the marks are monthly even when the formations are not
+///
+/// `rebalances` holds the formation dates, which are every month-end under a
+/// stride of one and every third under a stride of three. The portfolio is
+/// marked at every month-end in between regardless, so `net_monthly` is a
+/// monthly series whatever the stride and the `sqrt(12)` annualisation stays
+/// correct. Coarsening the marks with the stride would leave a quarterly series
+/// annualised as though it were monthly, which inflates the Sharpe by `sqrt(3)`
+/// with nothing visibly failing.
+///
+/// The rebalance cost lands on the first month of the stretch, because that is
+/// the month the trade happened in.
 pub fn run_schedule(
     panel: &Panel,
     config: &BacktestConfig,
     rebalances: &[Rebalance],
     mut pick: impl FnMut(usize, &Rebalance) -> Vec<usize>,
 ) -> Result<Series, EngineError> {
+    let month_ends = panel.month_ends();
     let mut held: Weights = Weights::new();
-    let mut net_monthly = Vec::with_capacity(rebalances.len());
-    let mut gross_monthly = Vec::with_capacity(rebalances.len());
+    let mut net_monthly = Vec::new();
+    let mut gross_monthly = Vec::new();
     let mut traded = Vec::with_capacity(rebalances.len());
     let mut exits = ExitCensus::default();
 
-    for (index, rebalance) in rebalances.iter().enumerate() {
-        let last = index + 1 == rebalances.len();
+    for (position, rebalance) in rebalances.iter().enumerate() {
+        let last = position + 1 == rebalances.len();
         let target = if last {
             // Nothing is bought on the final date. The portfolio is sold and
             // the cost of selling it lands on the month just finished.
             Weights::new()
         } else {
-            portfolio::equal_weight(&pick(index, rebalance))?
+            portfolio::equal_weight(&pick(position, rebalance))?
         };
 
         let moved = portfolio::traded_notional(&held, &target)?;
@@ -175,12 +188,18 @@ pub fn run_schedule(
             break;
         }
 
-        let advance =
-            portfolio::advance(panel, &target, rebalance.date, rebalances[index + 1].date)?;
-        exits = exits.plus(advance.exit_census);
-        gross_monthly.push(advance.gross_return);
-        net_monthly.push(portfolio::net_of_cost(advance.gross_return, cost)?);
-        held = advance.drifted;
+        let mut weights = target;
+        let mut charge = cost;
+        for step in rebalance.index..rebalances[position + 1].index {
+            let advance =
+                portfolio::advance(panel, &weights, month_ends[step], month_ends[step + 1])?;
+            exits = exits.plus(advance.exit_census);
+            gross_monthly.push(advance.gross_return);
+            net_monthly.push(portfolio::net_of_cost(advance.gross_return, charge)?);
+            charge = Decimal::ZERO;
+            weights = advance.drifted;
+        }
+        held = weights;
     }
 
     Ok(Series {
@@ -211,11 +230,17 @@ pub struct Report {
     pub max_drawdown: Decimal,
     pub total_net_return: Decimal,
     pub total_gross_return: Decimal,
-    /// Mean one-way turnover per rebalance. One-way, so a complete rotation
-    /// reads as 1.0 rather than 2.0.
+    /// Mean one-way turnover per formation, single-counted, so a complete
+    /// rotation reads as 1.0 rather than 2.0 and a quarterly schedule reports a
+    /// quarterly figure rather than a monthly one. This is the figure the
+    /// source paper's own turnover is comparable with.
     pub mean_one_way_turnover: Decimal,
     pub eligible_min: usize,
     pub eligible_max: usize,
+    /// Where the cross-section went at each formation, in formation order.
+    /// Carried whole rather than summarised, so a caller that wants every row
+    /// has it and the printer can decide how much of it to show.
+    pub formations: Vec<FormationCensus>,
     pub buy_and_hold: BaselineSeries,
     pub random: RandomBaseline,
     /// Whether cash dividends are in these returns, which decides which caveat
@@ -226,13 +251,15 @@ pub struct Report {
     pub delistings_imputed: bool,
 }
 
-/// Run the momentum strategy and both baselines over a panel.
-pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, EngineError> {
-    // Checked before anything runs. The configuration is what the trial log
-    // records and the panel is what the arithmetic sees, so a disagreement
-    // between them is a number labelled as something it is not. Catching it at
-    // the boundary costs one comparison; catching it later means noticing that
-    // a published figure was wrong.
+/// Every check that the configuration and the panel describe the same run.
+///
+/// One function rather than three blocks inline, so that no path through
+/// [`backtest`] can reach the arithmetic without going past all of them. The
+/// configuration is what the trial log records and the panel is what the
+/// arithmetic sees, so a disagreement between them is a number labelled as
+/// something it is not. Catching it at the boundary costs three comparisons;
+/// catching it later means noticing that a published figure was wrong.
+fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineError> {
     if config.actions_sha256.is_some() != panel.dividends_attached() {
         return Err(EngineError::DividendWiringMismatch {
             config_has_actions: config.actions_sha256.is_some(),
@@ -257,18 +284,66 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
             panel_has_delistings: attached,
         });
     }
-
-    let month_ends = panel.month_ends();
-    let lead_in = config.required_lead_in();
-    // Two dates are needed after the lead-in: one to buy on and one to sell on.
-    if month_ends.len() <= lead_in + 1 {
-        return Err(EngineError::InsufficientHistory {
-            months: month_ends.len(),
-            required: lead_in + 2,
+    // Once more, one dataset over again. Market caps decide both the size
+    // screen and the share-count leg, so a run that ranked on them without
+    // recording which file they came from is not reproducible from the log.
+    if config.marketcap_sha256.is_some() != panel.marketcaps_attached() {
+        return Err(EngineError::MarketcapWiringMismatch {
+            config_has_marketcap: config.marketcap_sha256.is_some(),
+            panel_has_marketcaps: panel.marketcaps_attached(),
         });
     }
 
+    // The conservative formula refuses the degraded run rather than producing
+    // one. Without dividends its payout leg is a share-count change with no
+    // payout in it, without market caps it has neither that leg nor its size
+    // screen, and without delistings its exits are unimputed. Each of those is
+    // a different strategy wearing this one's name, and a figure published
+    // under it would be a mislabelled trial rather than a weaker result.
+    if config.strategy == Strategy::ConservativeFormula
+        && !(panel.dividends_attached()
+            && panel.delistings_attached()
+            && panel.marketcaps_attached())
+    {
+        return Err(EngineError::ConservativeFormulaMissingInputs {
+            dividends: panel.dividends_attached(),
+            delistings: panel.delistings_attached(),
+            marketcaps: panel.marketcaps_attached(),
+        });
+    }
+    Ok(())
+}
+
+/// Run the configured strategy and both baselines over a panel.
+pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, EngineError> {
+    check_wiring(panel, config)?;
+
+    // Refused rather than clamped to one. A schedule that forms a portfolio
+    // every zero months is a configuration mistake, and the loop below would
+    // never advance past its first formation.
+    if config.rebalance_every_months == 0 {
+        return Err(EngineError::RebalanceStrideZero);
+    }
+    let stride = config.rebalance_every_months;
+
+    let month_ends = panel.month_ends();
+    let lead_in = config.required_lead_in();
+    // Two formation dates are needed after the lead-in, one to buy on and one
+    // to sell on, and they are a stride apart rather than a month apart.
+    if month_ends.len() <= lead_in + stride {
+        return Err(EngineError::InsufficientHistory {
+            months: month_ends.len(),
+            required: lead_in + stride + 1,
+        });
+    }
+
+    // The run ends at its last formation rather than at the panel's last
+    // month-end, so under a stride of three up to two trailing months go
+    // unused. That is deterministic and stated rather than papered over with a
+    // final partial period, which would be a holding period of a different
+    // length from every other one in the series.
     let rebalances: Vec<Rebalance> = (lead_in..month_ends.len())
+        .step_by(stride)
         .map(|index| momentum::rebalance_at(panel, config, index))
         .collect::<Result<_, _>>()?;
 
@@ -339,6 +414,10 @@ pub fn backtest(panel: &Panel, config: &BacktestConfig) -> Result<Report, Engine
         mean_one_way_turnover,
         eligible_min: eligible_counts.iter().copied().min().unwrap_or(0),
         eligible_max: eligible_counts.iter().copied().max().unwrap_or(0),
+        formations: rebalances
+            .iter()
+            .map(|rebalance| rebalance.census)
+            .collect(),
         strategy,
         buy_and_hold,
         random,

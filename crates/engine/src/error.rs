@@ -83,11 +83,65 @@ pub enum EngineError {
     },
 
     #[error(
+        "the configuration names a market cap file ({config_has_marketcap}) while the panel \
+         carries attached market caps ({panel_has_marketcaps}), and those must agree. Otherwise \
+         the run either ranks on a dataset the trial log does not record, or records one it \
+         never read"
+    )]
+    MarketcapWiringMismatch {
+        config_has_marketcap: bool,
+        panel_has_marketcaps: bool,
+    },
+
+    #[error(
+        "the conservative formula needs cash dividends (attached: {dividends}), classified \
+         delistings (attached: {delistings}) and market caps (attached: {marketcaps}), and all \
+         three are missing or partial here. A conservative formula without its payout leg is a \
+         different strategy rather than a degraded one, so it is refused instead of run"
+    )]
+    ConservativeFormulaMissingInputs {
+        dividends: bool,
+        delistings: bool,
+        marketcaps: bool,
+    },
+
+    #[error(
+        "the conservative formula needs {field} and the configuration leaves it unset, so the \
+         window it names has no length; a strategy missing one of its own windows is a \
+         configuration mistake rather than a degraded run"
+    )]
+    ConservativeWindowMissing { field: &'static str },
+
+    #[error(
+        "a market cap for {ticker} on {date} carries the negative amount {marketcap}, and no \
+         company is worth less than nothing. This table expresses a missing figure by omitting \
+         the row, so a negative that arrives anyway is a corrupt row rather than an absent one"
+    )]
+    NegativeMarketcap {
+        ticker: String,
+        date: Date,
+        marketcap: rust_decimal::Decimal,
+    },
+
+    #[error(
+        "the rebalance stride is zero, so the formation loop would never advance; a run that \
+         forms a portfolio every zero months is a configuration mistake rather than a schedule"
+    )]
+    RebalanceStrideZero,
+
+    #[error(
         "the liquidity floor fraction {fraction} is outside [0, 1), and a screen that \
          removes every eligible name or a negative number of them is a configuration \
          mistake rather than a screen"
     )]
     LiquidityFractionOutOfRange { fraction: rust_decimal::Decimal },
+
+    #[error(
+        "the size floor fraction {fraction} is outside [0, 1), and a screen that removes every \
+         eligible name or a negative number of them is a configuration mistake rather than a \
+         screen"
+    )]
+    SizeFloorFractionOutOfRange { fraction: rust_decimal::Decimal },
 
     #[error("encoding the configuration for hashing failed")]
     ConfigEncode(#[source] serde_json::Error),
