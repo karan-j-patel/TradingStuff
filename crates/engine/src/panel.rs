@@ -162,14 +162,15 @@ pub struct Series {
     /// Filings, ascending by `(as_reported, period_end)`. Empty until
     /// [`Panel::with_filings`] attaches any, on the same rule as the others.
     ///
-    /// The sort is on BOTH dates, not on `as_reported` alone, and the second
-    /// term is load-bearing. Two filings can share a publication date: a
-    /// delinquent filer catching up lodges two quarters on one day, which the
-    /// Phase A probe saw in its 160-day delayed case. The upstream duplicate
-    /// rule keys on `(asset, basis, scope, period_end)` and so does not forbid
-    /// it. Sorting by period end within a filing date makes "the latest filing
-    /// visible" mean the latest fiscal period among those published, on every
-    /// run, rather than whichever row the sort happened to leave last.
+    /// Held in a fixed order so a panel is reproducible, but the accessor does
+    /// NOT depend on it: `book_equity_usd_as_of` scans and takes the greatest
+    /// period among the visible filings, because the answer is ordered by
+    /// period while this vector is ordered by filing date.
+    ///
+    /// Two filings can share a publication date (a delinquent filer lodging two
+    /// quarters at once) and one period can carry two filings (an amendment,
+    /// measured on SOLR1). The upstream duplicate rule keys on
+    /// `(asset, basis, scope, period_end, as_reported)`, so it forbids neither.
     filings: Vec<FundamentalRecord>,
 }
 
@@ -419,12 +420,25 @@ impl Series {
     /// them. `x_f1` and `x_f2` pin the halves separately, because the delisting
     /// round proved a one-sided window test defends a deleted term.
     ///
-    /// # Which filing "latest" means
+    /// # Which filing "latest" means: the freshest PERIOD, not the newest filing
     ///
-    /// The last element with `as_reported <= as_of` under the `(as_reported,
-    /// period_end)` sort this series is held in, so filings sharing a
-    /// publication date resolve to the latest fiscal period rather than to an
-    /// arbitrary one. See the `filings` field for why that case is real.
+    /// Among the filings visible at `as_of`, the one describing the most recent
+    /// fiscal period, ties on period broken by the later filing date.
+    ///
+    /// Not the most recently filed, which is a different rule and a wrong one. A
+    /// company can amend an old period after it has already reported a newer
+    /// one: file Q1, file Q2, then file a correction to Q1. Picking the newest
+    /// filing serves the amended Q1 and discards Q2, so the book value goes
+    /// backwards in time while the data goes forwards. `x_f11` is that fixture.
+    ///
+    /// Ties on period end are broken by the later filing date, which is what
+    /// makes an amendment supersede the filing it corrects: both describe the
+    /// same period, and the later one is what the world knew last. Two different
+    /// periods filed on one day are unaffected, since their periods differ.
+    ///
+    /// The staleness bound below applies to the SELECTED filing's `as_reported`,
+    /// so a name is aged by how long ago it last spoke about the period being
+    /// read rather than by whatever it filed most recently.
     ///
     /// `None` when nothing is visible yet, when the latest visible filing is
     /// stale, or when that filing carries no `equityusd`. All three are
@@ -432,10 +446,15 @@ impl Series {
     /// yet is an ordinary state of the world, and the formation census counts
     /// it.
     pub fn book_equity_usd_as_of(&self, as_of: Date, staleness_days: usize) -> Option<Decimal> {
-        let visible = self
+        // ponytail: linear scan. Filing vectors are a few hundred rows at most
+        // and this runs once per name per formation; a binary search cannot
+        // express "greatest period among the visible" anyway, because the
+        // vector is ordered by filing date and the answer is ordered by period.
+        let filing = self
             .filings
-            .partition_point(|filing| filing.as_reported <= as_of);
-        let filing = self.filings[..visible].last()?;
+            .iter()
+            .filter(|filing| filing.as_reported <= as_of)
+            .max_by_key(|filing| (filing.period_end, filing.as_reported))?;
 
         // Civil dates carry no time, so the difference is whole days. The
         // checked conversion is defence in depth: `run::schedule` refuses a
@@ -940,13 +959,31 @@ impl Panel {
             .into_iter()
             .map(|series| {
                 let mut filings = by_identity.remove(&series.identity).unwrap_or_default();
-                // Both dates, for the reason the field documents: a shared
-                // publication date has to resolve to the latest fiscal period
-                // deterministically rather than however the sort landed.
+                // A fixed order so the panel is reproducible. Correctness does
+                // not rest on it; the accessor picks by period, not position.
                 filings.sort_by_key(|filing| (filing.as_reported, filing.period_end));
-                Series { filings, ..series }
+                // The curated writer refuses two rows sharing period, filing
+                // date, basis and scope, but this method accepts records from
+                // any caller, and an equal-key pair would leave the accessor's
+                // max_by_key with a tie that caller order resolves. Refused
+                // here too, so the engine door holds the same line as the
+                // writer. Sorted input makes equal keys adjacent.
+                for pair in filings.windows(2) {
+                    if pair[0].period_end == pair[1].period_end
+                        && pair[0].as_reported == pair[1].as_reported
+                        && pair[0].basis == pair[1].basis
+                        && pair[0].scope == pair[1].scope
+                    {
+                        return Err(EngineError::DuplicateFiling {
+                            ticker: series.asset.ticker.clone(),
+                            period_end: pair[0].period_end,
+                            as_reported: pair[0].as_reported,
+                        });
+                    }
+                }
+                Ok(Series { filings, ..series })
             })
-            .collect();
+            .collect::<Result<Vec<Series>, EngineError>>()?;
 
         for leftover in by_identity.values() {
             unmatched_filings += leftover.len();

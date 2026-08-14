@@ -143,6 +143,18 @@ pub enum EngineError {
     BookStalenessOutOfRange { days: usize },
 
     #[error(
+        "filings for {ticker} carry two rows for the period ending {period_end}, both filed \
+         {as_reported}. The curated writer refuses this shape, so a pair arriving here came \
+         around it, and which row the accessor would serve depends on caller order, which is \
+         a number nobody chose"
+    )]
+    DuplicateFiling {
+        ticker: String,
+        period_end: Date,
+        as_reported: Date,
+    },
+
+    #[error(
         "the liquidity floor fraction {fraction} is outside [0, 1), and a screen that \
          removes every eligible name or a negative number of them is a configuration \
          mistake rather than a screen"

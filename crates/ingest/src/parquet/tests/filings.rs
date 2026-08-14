@@ -121,35 +121,98 @@ fn f1_filings_round_trip_and_keep_absent_and_zero_apart() {
     assert_eq!(FILINGS_UNITS_KEY, "equity_units");
 }
 
-/// X-F9. Two rows sharing `(asset, basis, scope, period_end)` fail the write.
+/// The SOLR1 shape: one period, two filing dates, different values. Both kept.
 ///
-/// # Why an error rather than a dedup
+/// # Measured, not theorised
 ///
-/// The Phase A probe verified the as-reported dimension carries exactly one row
-/// per period on every subject it checked. A duplicate therefore means the fetch
-/// or the vendor broke, and silently keeping either row would pick a filing
-/// nobody chose. The two rows below carry different book values, so a dedup does
-/// not merely tidy the file, it decides a number.
+/// SOLR1 (sharadar 101544) is the first name in the universe and it stopped the
+/// first real walk dead. It carries two as-reported rows for period 1997-09-30,
+/// filed 1997-11-12 and 1998-01-28, with equity 26412144 then 25367144 and net
+/// income -8961 then -702961. That is a genuine amendment: the company restated
+/// the quarter it had already reported.
 ///
-/// The two rows differ in `as_reported`, which is what makes this the four-part
-/// key rather than the six-part filing identity: an amendment IS a distinct
-/// filing, and this dataset holds first filings only.
+/// Both rows are true point-in-time facts. On 1997-11-12 the world knew the
+/// first figures and nothing else; only from 1998-01-28 did it know the second.
+/// A writer that kept one would either invent a restatement before anyone could
+/// see it or throw the correction away, and both are lookahead in one direction
+/// or data loss in the other.
+///
+/// The values differ deliberately. A fixture whose two rows agreed would pass
+/// against a writer that silently dropped one of them.
 #[test]
-fn x_f9_two_rows_for_one_period_fail_the_write() {
+fn f2_one_period_filed_twice_on_different_dates_is_two_filings() {
+    let path = scratch("f2").join("filings.parquet");
+    let asset = sharadar("SOLR1", 101_544);
+    let period = day(1997, 9, 30);
+
+    let original = filing(
+        asset.clone(),
+        day(1997, 11, 12),
+        period,
+        &[("equityusd", "26412144"), ("netinc", "-8961")],
+    );
+    let amended = filing(
+        asset.clone(),
+        day(1998, 1, 28),
+        period,
+        &[("equityusd", "25367144"), ("netinc", "-702961")],
+    );
+
+    // Supplied amendment first, so the row order in the file is the writer's
+    // doing rather than the caller's.
+    assert_eq!(
+        write_filings(vec![amended, original], &path, "synthetic")
+            .expect("one period filed twice is two filings, not a duplicate"),
+        2
+    );
+
+    let read = read_filings(&path).expect("read");
+    assert_eq!(read.len(), 2, "a filing was dropped");
+
+    // Ordered by filing date within the period, deterministically.
+    assert_eq!(read[0].as_reported, day(1997, 11, 12));
+    assert_eq!(read[1].as_reported, day(1998, 1, 28));
+    assert_eq!(
+        read[0].fields.get("equityusd"),
+        Some(&dec("26412144")),
+        "the original filing's figures did not survive"
+    );
+    assert_eq!(
+        read[1].fields.get("equityusd"),
+        Some(&dec("25367144")),
+        "the amendment's figures did not survive"
+    );
+    assert_eq!(read[0].period_end, period);
+    assert_eq!(read[1].period_end, period);
+}
+
+/// X-F9. Two rows sharing period AND filing date fail the write.
+///
+/// The duplicate rule is now `(asset, basis, scope, period_end, as_reported)`.
+/// Two filings for one period on different dates are two events, which
+/// `f2_one_period_filed_twice_on_different_dates_is_two_filings` covers. The
+/// same period filed twice on the same date is the vendor sending one event
+/// twice, and keeping either copy picks a filing nobody chose.
+///
+/// The two rows carry different values, so a dedup does not merely tidy the
+/// file, it decides a number.
+#[test]
+fn x_f9_two_rows_for_one_period_on_one_date_fail_the_write() {
     let path = scratch("xf9").join("filings.parquet");
     let asset = sharadar("DUP", 1);
+    let filed = day(2024, 3, 15);
 
     let error = write_filings(
         vec![
             filing(
                 asset.clone(),
-                day(2024, 3, 15),
+                filed,
                 day(2023, 12, 31),
                 &[("equityusd", "100")],
             ),
             filing(
                 asset.clone(),
-                day(2024, 4, 20),
+                filed,
                 day(2023, 12, 31),
                 &[("equityusd", "999")],
             ),
@@ -157,7 +220,7 @@ fn x_f9_two_rows_for_one_period_fail_the_write() {
         &path,
         "synthetic",
     )
-    .expect_err("two rows for one period must be refused");
+    .expect_err("one period filed twice on one date must be refused");
 
     let message = error.to_string();
     assert!(
@@ -165,28 +228,28 @@ fn x_f9_two_rows_for_one_period_fail_the_write() {
         "the refusal does not name the duplicated filing, got {message}"
     );
     assert!(
+        message.contains("2024-03-15"),
+        "the refusal does not name the filing date that makes it a duplicate \
+         rather than an amendment, got {message}"
+    );
+    assert!(
         !path.exists(),
         "the write was refused and still left a file behind"
     );
 
     // The control. The same two rows under different periods are two filings
-    // and are written, so the refusal above is about the key and not about the
+    // and are written, so the refusal above is about the key and not the
     // fixture.
     assert_eq!(
         write_filings(
             vec![
                 filing(
                     asset.clone(),
-                    day(2024, 3, 15),
+                    filed,
                     day(2023, 12, 31),
                     &[("equityusd", "100")]
                 ),
-                filing(
-                    asset,
-                    day(2024, 4, 20),
-                    day(2024, 3, 31),
-                    &[("equityusd", "999")]
-                ),
+                filing(asset, filed, day(2024, 3, 31), &[("equityusd", "999")]),
             ],
             &path,
             "synthetic",

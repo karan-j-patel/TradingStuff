@@ -590,6 +590,37 @@ fn x_f7_the_value_program_carries_its_settled_parameters() {
     );
 }
 
+/// Two records sharing (period, filing date, basis, scope) are refused at the
+/// panel, not only at the writer.
+///
+/// The writer guards the curated path, but `with_filings` accepts records from
+/// any caller, and two equal-key rows with different values would leave the
+/// accessor's max_by_key with a tie that caller order resolves. The same
+/// one-call-from-a-mislabelled-state shape as the `retaining` finding, closed
+/// the same way: refused at the engine door, found by cross-model review.
+#[test]
+fn two_filings_sharing_period_and_date_are_refused_at_the_panel() {
+    let m = month_ends();
+    let one = asset("ONE", 1);
+    let prices: Vec<(AssetKey, Vec<(Date, Decimal)>)> = vec![(
+        one.clone(),
+        m.iter().map(|day| (*day, dec("100"))).collect(),
+    )];
+
+    let result = panel_of(&prices).with_filings(
+        &[
+            filing(&one, m[1], m[0], "100000000"),
+            filing(&one, m[1], m[0], "200000000"),
+        ],
+        FILINGS_SHA256,
+    );
+    assert!(
+        matches!(result, Err(EngineError::DuplicateFiling { .. })),
+        "two rows for one period on one filing date attached without refusal, \
+         so the book value read for that period depends on caller order"
+    );
+}
+
 /// A value configuration with no staleness bound is refused rather than
 /// defaulted.
 ///
@@ -661,6 +692,20 @@ fn a_staleness_bound_the_age_arithmetic_cannot_hold_is_refused() {
 }
 
 /// Two filings published on one day resolve to the later fiscal period.
+///
+/// # What guarantees this, measured
+///
+/// Two terms, either of which suffices, so neither is independently observable
+/// through the public API. The accessor takes the greatest `(period_end,
+/// as_reported)` among the visible filings, which is correct whatever order the
+/// vector holds; and `with_filings` sorts on both dates, which would make even a
+/// position-dependent rule land right. Mutating either term alone leaves this
+/// test green, and that was measured rather than assumed.
+///
+/// Recorded rather than tidied away. Before the amendment round the sort WAS the
+/// guarantee and this test was the thing pinning it; now the accessor is, and
+/// the sort's second term is belt and braces on a lookahead-adjacent path. That
+/// is a reason to keep it, not a reason to claim it is separately tested.
 ///
 /// A delinquent filer catching up lodges two quarters at once, which the Phase A
 /// probe saw in its 160-day delayed case. The upstream duplicate rule keys on
@@ -796,5 +841,86 @@ fn d2_unmatched_filings_counts_records_rather_than_names() {
         "the unmatched count is not the number of records the panel could not \
          place, so it is counting names and would report one overhanging \
          security's whole filing history as a single row"
+    );
+}
+
+/// X-F11. An amendment of an old period does not displace a newer period.
+///
+/// # The bug the duplicate refusal was hiding
+///
+/// A company files Q1, then files Q2, then files a correction to Q1. All three
+/// are visible afterwards. Picking the most recently FILED row serves the
+/// amended Q1 and discards Q2 entirely, so the book value the strategy reads
+/// goes backwards in time while the calendar goes forwards.
+///
+/// This was unreachable until now only because the writer refused to store a
+/// second filing for one period at all. The SOLR1 walk proved amendments are
+/// real, the writer now keeps them, and this is what stops keeping them from
+/// introducing a worse fault than the one it fixed.
+///
+/// ```text
+///   filed 2024-01-10   period 2023-09-30 (Q1)   book 100
+///   filed 2024-01-20   period 2023-12-31 (Q2)   book 200   <- the freshest period
+///   filed 2024-01-30   period 2023-09-30 (Q1)   book 999   an amendment of Q1
+///
+///   as of 2024-02-10: every row visible, the answer is Q2's 200
+///   as of 2024-01-15: only the first row visible, the answer is Q1's ORIGINAL 100
+/// ```
+///
+/// The amendment's book is deliberately the largest number in the fixture, so a
+/// rule that picks the newest filing picks it and cannot pass by coincidence.
+#[test]
+fn x_f11_an_amendment_of_an_old_period_does_not_displace_a_newer_one() {
+    let m = month_ends();
+    let one = asset("ONE", 1);
+    let q1 = date(2023, 9, 30);
+    let q2 = date(2023, 12, 31);
+
+    let panel = valued_panel(
+        &[(one.clone(), "100")],
+        &m.iter()
+            .map(|day| cap(&one, *day, "100"))
+            .collect::<Vec<_>>(),
+        &[
+            filing(&one, date(2024, 1, 10), q1, "100"),
+            filing(&one, date(2024, 1, 20), q2, "200"),
+            filing(&one, date(2024, 1, 30), q1, "999"),
+        ],
+    );
+    let series = &panel.securities()[0];
+
+    assert_eq!(
+        series.book_equity_usd_as_of(date(2024, 2, 10), 548),
+        Some(dec("200")),
+        "the amendment of the older period displaced the newer period's book, \
+         so the value read goes backwards in time as more data arrives"
+    );
+
+    // Point-in-time, the other half: before the amendment existed the original
+    // figure is what the world knew, and it is what the accessor must serve.
+    assert_eq!(
+        series.book_equity_usd_as_of(date(2024, 1, 15), 548),
+        Some(dec("100")),
+        "the original filing's figure is not what was visible before the \
+         amendment was published"
+    );
+
+    // And an amendment DOES supersede the filing it corrects, once both are
+    // visible and no newer period exists to outrank them.
+    let amended_only = valued_panel(
+        &[(one.clone(), "100")],
+        &m.iter()
+            .map(|day| cap(&one, *day, "100"))
+            .collect::<Vec<_>>(),
+        &[
+            filing(&one, date(2024, 1, 10), q1, "100"),
+            filing(&one, date(2024, 1, 30), q1, "999"),
+        ],
+    );
+    assert_eq!(
+        amended_only.securities()[0].book_equity_usd_as_of(date(2024, 2, 10), 548),
+        Some(dec("999")),
+        "an amendment did not supersede the filing it corrects, so the tie on \
+         period end is broken the wrong way"
     );
 }

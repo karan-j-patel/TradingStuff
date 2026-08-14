@@ -25,6 +25,7 @@
 //! looks joinable and is not. A column nobody may use is a trap with a schema
 //! entry.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,12 +37,15 @@ use bytes::Bytes;
 
 use super::CurateError;
 use super::codec::{
-    DECIMAL_PRECISION, DECIMAL_SCALE, date_column, date_to_days, decimal_column, decimal_to_i128,
-    decode_identity, optional_decimal, optional_str, required_date, required_str, string_column,
+    DECIMAL_PRECISION, DECIMAL_SCALE, Identity, date_column, date_to_days, decimal_column,
+    decimal_to_i128, decode_identity, describe, encode_identity, optional_decimal, optional_str,
+    required_date, required_str, string_column,
 };
 use super::enums::{basis_from, basis_str, scope_from, scope_str};
 use super::prices::SOURCE_KEY;
-use crate::provider::FundamentalRecord;
+use crate::provider::{FundamentalRecord, ReportBasis, ReportScope};
+use crate::schema::AssetKey;
+use jiff::civil::Date;
 
 pub(crate) const DATASET: &str = "filings";
 
@@ -139,12 +143,7 @@ pub fn write_filings(
     path: &Path,
     source: &str,
 ) -> Result<usize, CurateError> {
-    let rows = super::prepare(DATASET, rows, |row| super::RowKey {
-        asset: &row.asset,
-        date: row.period_end,
-        kind: Some(basis_str(row.basis)),
-        subkind: Some(scope_str(row.scope)),
-    })?;
+    let rows = prepare_filings(rows)?;
     let count = rows.len();
 
     let mut ticker = Vec::with_capacity(count);
@@ -217,6 +216,94 @@ pub fn write_filings(
     })?;
 
     Ok(count)
+}
+
+/// Reject duplicates on the five-part key, then put the rows in a
+/// deterministic order.
+///
+/// # Why this is not `super::prepare`
+///
+/// The shared helper keys on `(asset, date, kind, subkind)`, one date. This
+/// dataset needs two: a company can file twice for one period, and the second
+/// filing is a new public event rather than a duplicate row.
+///
+/// Measured, not theorised. SOLR1 (sharadar 101544) carries two as-reported
+/// rows for period 1996-12-31, filed 1997-04-15 and 1997-04-30 with identical
+/// values, and two for 1997-09-30, filed 1997-11-12 and 1998-01-28 with
+/// DIFFERENT equity and net income. The second pair is a genuine amendment. Both
+/// rows of both pairs are true point-in-time facts: on 1997-11-12 the world knew
+/// the first set of figures, and only from 1998-01-28 did it know the second.
+/// Collapsing them would either invent a restatement nobody could see yet or
+/// discard the correction entirely.
+///
+/// The probe's "as-reported keeps the first filing, amendments never appear" was
+/// verified on a 2017 filer and does not hold for 1990s names.
+///
+/// So the duplicate rule is `(asset, basis, scope, period_end, as_reported)`.
+/// Two filings for one period on different dates are two rows; the same period
+/// filed twice on the same date is still a hard error, because that is the
+/// vendor sending one event twice and keeping either copy picks a filing nobody
+/// chose.
+///
+/// The ordering came with it. `super::sort_key` has no `as_reported` term, so
+/// two rows differing only in filing date would hold their input order and the
+/// file's bytes would depend on the order the fetch happened to collect them.
+fn prepare_filings(
+    rows: Vec<FundamentalRecord>,
+) -> Result<Vec<(Identity, FundamentalRecord)>, CurateError> {
+    if rows.is_empty() {
+        return Err(CurateError::EmptyDataset { dataset: DATASET });
+    }
+
+    let mut seen: HashSet<(AssetKey, ReportBasis, ReportScope, Date, Date)> =
+        HashSet::with_capacity(rows.len());
+    for row in &rows {
+        let key = (
+            row.asset.clone(),
+            row.basis,
+            row.scope,
+            row.period_end,
+            row.as_reported,
+        );
+        if !seen.insert(key) {
+            return Err(CurateError::DuplicateRow {
+                dataset: DATASET,
+                asset: describe(&row.asset),
+                date: row.period_end,
+                qualifier: format!(
+                    " ({} {} filed {})",
+                    basis_str(row.basis),
+                    scope_str(row.scope),
+                    row.as_reported
+                ),
+            });
+        }
+    }
+
+    let mut decorated: Vec<(Identity, FundamentalRecord)> = rows
+        .into_iter()
+        .map(|row| (encode_identity(&row.asset), row))
+        .collect();
+
+    // Identity first with nulls last, matching `super::sort_key`, then the two
+    // dates. Borrowed throughout, so ordering allocates nothing.
+    decorated.sort_by(|left, right| {
+        let key = |identity: &'_ Identity, row: &'_ FundamentalRecord| {
+            (
+                identity.kind.is_none(),
+                identity.kind,
+                identity.id.clone(),
+                identity.ticker.clone(),
+                row.period_end,
+                row.as_reported,
+                basis_str(row.basis),
+                scope_str(row.scope),
+            )
+        };
+        key(&left.0, &left.1).cmp(&key(&right.0, &right.1))
+    });
+
+    Ok(decorated)
 }
 
 /// Read every record back, in the order the file holds them.
