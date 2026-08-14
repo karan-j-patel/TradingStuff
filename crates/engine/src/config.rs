@@ -575,6 +575,48 @@ impl BacktestConfig {
         }
     }
 
+    /// The configuration the characteristic panel is exported under.
+    ///
+    /// # Why the export needs a configuration of its own
+    ///
+    /// Every window in [`BacktestConfig`] is optional because most programs have
+    /// no use for most of them, and a program's configuration leaves the ones it
+    /// does not read as `None`. The export reads all of them at once: it writes
+    /// the momentum window, the two volatility windows, both payout windows and
+    /// the book staleness bound as columns side by side. Run under momentum's
+    /// configuration the three payout and volatility windows are `None`, the
+    /// [`crate::export`] guard refuses, and run under a configuration that
+    /// merely tolerated them the columns would be silently absent instead.
+    ///
+    /// So every optional window is `Some` here, at the value the program that
+    /// owns it ships. The columns are the strategies' own numbers, which is what
+    /// `x_r4` pins by equality against the rebalances themselves.
+    ///
+    /// # Why this is deliberately absent from [`RUNNABLE`]
+    ///
+    /// [`RUNNABLE`] is the backtest door and everything through it records a
+    /// trial. This configuration ranks nothing and holds nothing, so a trial
+    /// recorded under it would be a hypothesis nobody put forward. Keeping it
+    /// out of the registry makes it unreachable from `--program`, which is what
+    /// stops that happening by accident rather than by discipline.
+    ///
+    /// `strategy` is [`Strategy::Momentum`] because the export's eligibility
+    /// flag is momentum's three rules and its formation window is momentum's.
+    /// The field decides nothing else here: no ranking happens, so no end of a
+    /// ranking is taken. The two screening fractions stay `None` because they
+    /// are screens rather than windows, and the export writes the median dollar
+    /// volume and the market cap as columns for the consumer to screen on
+    /// rather than screening on them itself.
+    pub fn panel_export(universe_sha256: impl Into<String>) -> Self {
+        Self {
+            volatility_lookback_months: Some(36),
+            payout_share_average_months: Some(24),
+            payout_dividend_trailing_months: Some(12),
+            book_staleness_days: Some(548),
+            ..Self::momentum_v0(universe_sha256)
+        }
+    }
+
     /// How many month-ends of history a rebalance needs before it can happen.
     ///
     /// The momentum signal reads the close at the end of month `t - lookback`

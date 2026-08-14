@@ -393,21 +393,7 @@ pub(crate) fn resolve(
     delistings: Option<&Path>,
     attachments: &Attachments,
 ) -> anyhow::Result<(BacktestConfig, HashSet<AssetKey>)> {
-    let text = std::fs::read_to_string(universe)
-        .with_context(|| format!("reading the universe file {}", universe.display()))?;
-    // Hashed over the bytes on disk, so the recorded value is the one `shasum`
-    // prints for the same file.
-    let sha256 = rigor::hash_bytes(text.as_bytes());
-    let entries = ingest::universe::from_jsonl(&text)
-        .map_err(|error| anyhow::anyhow!("universe file line {}: {}", error.line, error.source))?;
-    let members = entries.into_iter().map(|entry| entry.asset).collect();
-
-    // All three datasets, one rule, and the digests come from the buffers the
-    // records will be parsed out of rather than from a second read of the path.
-    let actions_sha256 = Attachments::sha256(&attachments.actions);
-    let delistings_sha256 = Attachments::sha256(&attachments.delistings);
-    let marketcap_sha256 = Attachments::sha256(&attachments.marketcap);
-    let filings_sha256 = Attachments::sha256(&attachments.filings);
+    let (sha256, members) = read_universe(universe)?;
 
     let config = BacktestConfig::for_program(program, variant, sha256).ok_or_else(|| {
         // Listed from the registry rather than written out, so a pair added
@@ -429,17 +415,53 @@ pub(crate) fn resolve(
         )
     })?;
 
+    Ok((with_digests(config, delistings, attachments), members))
+}
+
+/// Read the universe file once, for the hash a configuration records and for
+/// the membership the panel is filtered to.
+///
+/// Extracted from [`resolve`] because the panel export needs the identical two
+/// answers under a configuration the program registry does not serve. Two
+/// copies of this would be two answers to "which securities is this run allowed
+/// to see", and the hash is what makes the recorded configuration mean a
+/// specific list rather than whatever the sampling rule produces today.
+pub(crate) fn read_universe(universe: &Path) -> anyhow::Result<(String, HashSet<AssetKey>)> {
+    let text = std::fs::read_to_string(universe)
+        .with_context(|| format!("reading the universe file {}", universe.display()))?;
+    // Hashed over the bytes on disk, so the recorded value is the one `shasum`
+    // prints for the same file.
+    let sha256 = rigor::hash_bytes(text.as_bytes());
+    let entries = ingest::universe::from_jsonl(&text)
+        .map_err(|error| anyhow::anyhow!("universe file line {}: {}", error.line, error.source))?;
     Ok((
-        BacktestConfig {
-            actions_sha256,
-            delisting_convention: delistings.map(|_| engine::DELISTING_CONVENTION.to_string()),
-            delistings_sha256,
-            marketcap_sha256,
-            filings_sha256,
-            ..config
-        },
-        members,
+        sha256,
+        entries.into_iter().map(|entry| entry.asset).collect(),
     ))
+}
+
+/// The dataset digests the attachments carry, written onto a configuration.
+///
+/// All four datasets, one rule, and the digests come from the buffers the
+/// records will be parsed out of rather than from a second read of the path.
+///
+/// Extracted alongside [`read_universe`] and for the same reason. The engine's
+/// wiring guard compares these against what the panel actually attached, so a
+/// second copy of this that fell one dataset behind would make every export
+/// under it refuse, or worse, not.
+pub(crate) fn with_digests(
+    config: BacktestConfig,
+    delistings: Option<&Path>,
+    attachments: &Attachments,
+) -> BacktestConfig {
+    BacktestConfig {
+        actions_sha256: Attachments::sha256(&attachments.actions),
+        delisting_convention: delistings.map(|_| engine::DELISTING_CONVENTION.to_string()),
+        delistings_sha256: Attachments::sha256(&attachments.delistings),
+        marketcap_sha256: Attachments::sha256(&attachments.marketcap),
+        filings_sha256: Attachments::sha256(&attachments.filings),
+        ..config
+    }
 }
 
 pub(crate) fn build_panel(

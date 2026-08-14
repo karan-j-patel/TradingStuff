@@ -22,6 +22,7 @@ mod filings;
 mod from_bytes;
 mod marketcap;
 mod ordering;
+mod panel;
 mod strictness;
 mod validation;
 

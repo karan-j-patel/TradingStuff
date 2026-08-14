@@ -562,6 +562,7 @@ impl Panel {
             .collect();
 
         let month_ends = month_ends_of(&dates);
+        check_months_consecutive(&month_ends)?;
 
         Ok(Panel {
             securities,
@@ -1094,6 +1095,56 @@ impl Panel {
         let end = self.dates.partition_point(|date| *date <= through);
         end.saturating_sub(start)
     }
+}
+
+/// The number of whole months from a fixed origin, so two month-ends can be
+/// compared on the calendar rather than on the day of the month.
+///
+/// Month-ends are last TRADING days, so their day numbers wander between 28 and
+/// 31 and a difference in days says nothing about how many months elapsed. The
+/// year and the month are the whole of the question.
+fn month_ordinal(date: Date) -> i32 {
+    i32::from(date.year()) * 12 + i32::from(date.month())
+}
+
+/// Refuse a panel whose month-ends skip a calendar month.
+///
+/// # Why this is a construction guard and not a check at each reader
+///
+/// [`month_ends_of`] picks the last date of each calendar month PRESENT in the
+/// data and proves nothing about consecutiveness. Every consumer in this crate
+/// then does arithmetic on the INDEX: momentum reads `index - 12`, the
+/// conservative formula reads `index - 36`, the export's forward label reads
+/// `index + 1`. Each of those is written and documented as a span of calendar
+/// months, and each is really a span of however many month-ends happen to
+/// exist.
+///
+/// If an entire calendar month were missing from the source data, every one of
+/// them would silently cover more calendar time than its name claims. A
+/// "one-month" forward label would span two months, a 12-1 momentum window
+/// would span thirteen, and nothing anywhere would look wrong: the numbers
+/// stay plausible, in the right units, with the right sign.
+///
+/// So the guarantee is established once, here, where the calendar is built.
+/// After this returns, index arithmetic on `month_ends` IS calendar arithmetic
+/// for every consumer, present and future, rather than being a property each
+/// one has to remember to check. [`Panel::retaining`] and the four attachment
+/// constructors carry `month_ends` through unchanged, so they inherit it.
+///
+/// A gap is a data fault rather than a state to tolerate. A universe where no
+/// security traded for a whole calendar month is not a thin month, it is a
+/// missing fetch, and `CLAUDE.md` is explicit that malformed input errors
+/// rather than being normalised or worked around.
+fn check_months_consecutive(month_ends: &[Date]) -> Result<(), EngineError> {
+    for pair in month_ends.windows(2) {
+        if month_ordinal(pair[1]) != month_ordinal(pair[0]) + 1 {
+            return Err(EngineError::PanelMonthGap {
+                before: pair[0],
+                after: pair[1],
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Pick the last date of each calendar month from an ascending, deduplicated

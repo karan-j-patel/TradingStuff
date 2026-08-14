@@ -233,7 +233,27 @@ pub fn share_change(
 /// issuing shares is the opposite of paying shareholders, so issuance lowers
 /// the yield and a buyback raises it. Walkshausl (2020), adapting the same
 /// formula, states it outright.
-pub fn net_payout_yield(
+/// # Why this is crate-private
+///
+/// Found by the same sweep as the two rebalancers and shrunk on the same rule.
+/// `month_ends[index]` on the first line of the body is a raw index with no
+/// bound of its own, so an out-of-range `index` from outside the crate panics
+/// rather than returning `None`. Every in-crate caller reaches it from a
+/// formation loop that derived the index from the panel it is walking.
+///
+/// Note what is NOT shrunk beside it: [`share_change`] takes an index too and
+/// reads it through `month_ends.get(index)?` and `checked_sub`, so it is total
+/// for any input and stays public.
+///
+/// ```compile_fail
+/// fn cannot_read_the_payout_from_outside(
+///     series: &engine::panel::Series,
+///     month_ends: &[jiff::civil::Date],
+/// ) {
+///     let _ = engine::conservative::net_payout_yield(series, month_ends, 24, 24, 12);
+/// }
+/// ```
+pub(crate) fn net_payout_yield(
     series: &Series,
     month_ends: &[Date],
     index: usize,
@@ -280,7 +300,23 @@ fn descending_ranks(values: &[(usize, Decimal)]) -> BTreeMap<usize, usize> {
 /// after the volatility split would take half of a different set, and a
 /// volatility split applied before the size screen would rank names the screen
 /// was going to remove.
-pub fn rebalance_at(
+/// # Why this is crate-private
+///
+/// The same reason [`crate::momentum::rebalance_at`] is, and this one indexes
+/// `month_ends` four ways rather than three: the volatility window, the two
+/// momentum endpoints, and the formation date itself. None is checked here,
+/// because both doors that reach a formation check the relation first, and a
+/// caller outside this crate would have passed neither.
+///
+/// ```compile_fail
+/// fn cannot_form_a_conservative_rebalance_from_outside(
+///     panel: &engine::Panel,
+///     config: &engine::BacktestConfig,
+/// ) {
+///     let _ = engine::conservative::rebalance_at(panel, config, 36);
+/// }
+/// ```
+pub(crate) fn rebalance_at(
     panel: &Panel,
     config: &BacktestConfig,
     index: usize,

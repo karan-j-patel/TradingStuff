@@ -5,7 +5,7 @@
 //! appears in either direction. A curated file that cannot be read back into
 //! the exact value that was written is a file that quietly changed the data.
 
-use arrow::array::{Array, Date32Array, Decimal128Array, StringArray};
+use arrow::array::{Array, BooleanArray, Date32Array, Decimal128Array, StringArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use jiff::civil::Date;
@@ -232,6 +232,14 @@ pub(crate) fn decimal_column<'a>(
     )
 }
 
+pub(crate) fn bool_column<'a>(
+    batch: &'a RecordBatch,
+    dataset: &'static str,
+    field: &'static str,
+) -> Result<&'a BooleanArray, CurateError> {
+    column(batch, dataset, field, &DataType::Boolean)
+}
+
 /// Fetch one column by name, verify its type, and downcast it.
 ///
 /// The `A: 'static` bound is what `downcast_ref` needs to compare type
@@ -323,6 +331,37 @@ pub(crate) fn optional_decimal(
         return Ok(None);
     }
     i128_to_decimal(dataset, field, array.value(row)).map(Some)
+}
+
+pub(crate) fn required_bool(
+    array: &BooleanArray,
+    dataset: &'static str,
+    field: &'static str,
+    row: usize,
+) -> Result<bool, CurateError> {
+    if array.is_null(row) {
+        return Err(CurateError::NullInRequiredColumn {
+            dataset,
+            field,
+            row,
+        });
+    }
+    Ok(array.value(row))
+}
+
+/// Read a boolean that is allowed to be absent, distinguishing absent from
+/// false.
+///
+/// The distinction is the whole reason this exists rather than a
+/// `value_or_default`. A flag saying "this name did not stop trading in the
+/// window" and a flag saying "there was no window to look at" are different
+/// facts, and collapsing them invents the first one.
+pub(crate) fn optional_bool(array: &BooleanArray, row: usize) -> Option<bool> {
+    if array.is_null(row) {
+        None
+    } else {
+        Some(array.value(row))
+    }
 }
 
 pub(crate) fn required_date(

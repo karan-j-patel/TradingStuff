@@ -33,7 +33,7 @@ use crate::{momentum, run, value};
 pub const FILINGS_SHA256: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
 /// One synthetic filing. `equityusd` is the only field any strategy reads.
-fn filing(
+pub(super) fn filing(
     asset: &AssetKey,
     as_reported: Date,
     period_end: Date,
@@ -55,7 +55,7 @@ fn filing(
 }
 
 /// A market cap row, in the vendor's millions.
-fn cap(asset: &AssetKey, date: Date, millions: &str) -> MarketCapRecord {
+pub(super) fn cap(asset: &AssetKey, date: Date, millions: &str) -> MarketCapRecord {
     MarketCapRecord {
         asset: asset.clone(),
         date,

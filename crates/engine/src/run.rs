@@ -279,7 +279,14 @@ pub struct Report {
 /// arithmetic sees, so a disagreement between them is a number labelled as
 /// something it is not. Catching it at the boundary costs three comparisons;
 /// catching it later means noticing that a published figure was wrong.
-fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineError> {
+///
+/// Crate-visible rather than private so [`crate::export`] can go past the same
+/// checks. An artifact written under a configuration whose recorded digests are
+/// not the digests of the data it read is as unreproducible as a trial recorded
+/// that way, and the export carries those digests into the file's own metadata.
+/// Not `pub`: the checks describe an internal pairing of two of this crate's
+/// types and an external caller has no way to construct a panel that fails them.
+pub(crate) fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineError> {
     if config.actions_sha256.is_some() != panel.dividends_attached() {
         return Err(EngineError::DividendWiringMismatch {
             config_has_actions: config.actions_sha256.is_some(),
@@ -431,6 +438,44 @@ fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineErro
     Ok(())
 }
 
+/// The formation window has something in it.
+///
+/// Every consumer computes the window as `month_ends[index - lookback]` to
+/// `month_ends[index - skip]`, so the skip must be strictly the smaller of the
+/// two or the window ends at or before it starts. Strict, because an equal skip
+/// and lookback give a zero-length window, which is the same nonsense as a
+/// negative one.
+///
+/// # Why this is one function called from two doors rather than a `checked_sub`
+///
+/// Both failures it prevents were measured on 2026-08-14 rather than reasoned
+/// about, and neither is confined to one call site.
+///
+/// A skip past the lead-in underflows the index and PANICS, in
+/// `momentum::rebalance_at` on the backtest path and in
+/// [`crate::export::characteristics`] on the export path. `CLAUDE.md` requires
+/// a typed refusal, not a panic.
+///
+/// A skip inside the lead-in does not panic at all, and that case is worse. The
+/// window simply reverses: `momentum::signal` divides the earlier close by the
+/// later one and returns a BACKWARD return, `lowvol::volatility` spans an empty
+/// slice and returns `None`, the coverage rule compares zero bars against a
+/// requirement of zero and admits every name, and a complete backtest runs to a
+/// Sharpe with nothing visibly wrong. On the two-asset fixture that Sharpe was
+/// -6.93.
+///
+/// So the relation is checked once, at both entry points, before any index
+/// arithmetic happens.
+pub(crate) fn check_signal_window(config: &BacktestConfig) -> Result<(), EngineError> {
+    if config.signal_skip_months >= config.signal_lookback_months {
+        return Err(EngineError::SignalWindowInverted {
+            lookback_months: config.signal_lookback_months,
+            skip_months: config.signal_skip_months,
+        });
+    }
+    Ok(())
+}
+
 /// The formation dates a configuration implies over a panel, each already
 /// resolved into the names it would hold.
 ///
@@ -439,6 +484,9 @@ fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineErro
 /// a collapse rule that drifted between two copies would make the diagnostic
 /// describe a run nobody could reproduce.
 pub fn schedule(panel: &Panel, config: &BacktestConfig) -> Result<Vec<Rebalance>, EngineError> {
+    // Before any index arithmetic, because the failure it prevents is an
+    // underflow inside `momentum::rebalance_at` at the first formation.
+    check_signal_window(config)?;
     // Refused rather than clamped to one. A schedule that forms a portfolio
     // every zero months is a configuration mistake, and the loop below would
     // never advance past its first formation.

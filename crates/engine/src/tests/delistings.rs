@@ -368,10 +368,25 @@ fn e11d_an_unexplained_exit_keeps_its_last_close_and_is_counted() {
 #[test]
 fn e11e_a_temporary_gap_is_never_imputed() {
     let gap = asset("GAP", 1);
-    let bars = vec![
+    // A second name that trades every month, so the PANEL's calendar has no
+    // hole in April while GAP's own bars do. The distinction is the subject of
+    // this test: one security going quiet is an ordinary event, and a month in
+    // which nothing traded anywhere is a missing fetch that `Panel::from_bars`
+    // refuses. Nothing here holds it, so it reaches no arithmetic below; it
+    // sorts after GAP on identity, so GAP is still security 0.
+    let keeper = asset("KEEP", 2);
+    let mut bars = vec![
         bar(&gap, date(2020, 3, 31), dec("20"), dec("20")),
         bar(&gap, date(2020, 5, 29), dec("18"), dec("18")),
     ];
+    for day in [
+        date(2020, 3, 31),
+        date(2020, 4, 30),
+        date(2020, 5, 29),
+        date(2020, 6, 30),
+    ] {
+        bars.push(bar(&keeper, day, dec("50"), dec("50")));
+    }
     let panel = with_delistings(
         Panel::from_bars(bars).expect("fixture panel builds"),
         &[delisting(

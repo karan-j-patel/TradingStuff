@@ -166,7 +166,32 @@ pub(crate) fn tradable(
     Ok(kept)
 }
 
-pub fn rebalance_at(
+/// # Why this is crate-private
+///
+/// The three lines below index `month_ends` by `index - lookback` and
+/// `index - skip` with no check of their own. Both relations are guarded at the
+/// two doors that reach a formation, [`crate::run::schedule`] and
+/// [`crate::export::characteristics`], which call
+/// [`crate::run::check_signal_window`] first. A caller outside this crate would
+/// reach the subtraction having passed neither, and an inverted window does not
+/// merely fail: measured on 2026-08-14, a skip past the lead-in panics here and
+/// a skip inside it silently produces a backward return that a whole backtest
+/// runs to a Sharpe on.
+///
+/// Re-checking the relation inside this function would be a second
+/// implementation of a guarantee that already has one. Unreachable from outside
+/// is the cheaper and stronger answer, and it is the rule
+/// [`crate::panel::Panel::retaining`] already follows:
+///
+/// ```compile_fail
+/// fn cannot_form_a_rebalance_from_outside(
+///     panel: &engine::Panel,
+///     config: &engine::BacktestConfig,
+/// ) {
+///     let _ = engine::momentum::rebalance_at(panel, config, 12);
+/// }
+/// ```
+pub(crate) fn rebalance_at(
     panel: &Panel,
     config: &BacktestConfig,
     index: usize,

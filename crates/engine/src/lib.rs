@@ -40,12 +40,16 @@
 //!   computes no return and records no trial.
 //! - [`deletions`] probes one user-originated hypothesis about index deletions.
 //!   It computes returns and no Sharpe, and records no trial itself.
+//! - [`export`] writes the characteristic panel every strategy's own signal
+//!   already produces, plus a forward return label. It ranks nothing and
+//!   records no trial.
 
 pub mod baseline;
 pub mod config;
 pub mod conservative;
 pub mod deletions;
 pub mod error;
+pub mod export;
 pub mod liquidity;
 pub mod lowvol;
 pub mod momentum;

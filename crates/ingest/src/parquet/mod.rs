@@ -59,6 +59,7 @@ mod enums;
 mod error;
 mod filings;
 mod marketcap;
+mod panel;
 mod prices;
 
 #[cfg(test)]
@@ -77,6 +78,10 @@ pub use filings::{
 pub use marketcap::{
     MarketCapProvenance, UNITS, UNITS_KEY, marketcap_provenance, read_marketcap,
     read_marketcap_from_bytes, write_marketcap,
+};
+pub use panel::{
+    CONFIG_HASH_KEY, DIGEST_KEYS, PanelProvenance, PanelRow, panel_provenance, read_panel,
+    read_panel_from_bytes, write_panel,
 };
 pub use prices::{
     BASIS, BASIS_KEY, Provenance, SOURCE_KEY, prices_provenance, read_prices, write_prices,
@@ -128,6 +133,12 @@ pub fn marketcap_path(data_root: &Path) -> PathBuf {
 
 pub fn filings_path(data_root: &Path) -> PathBuf {
     data_root.join("curated/filings/filings.parquet")
+}
+
+/// The characteristic panel. Written by the engine's export, read by the fit
+/// script, and the only curated file this codebase produces rather than fetches.
+pub fn panel_path(data_root: &Path) -> PathBuf {
+    data_root.join("curated/panel/panel.parquet")
 }
 
 /// How many rejected records to name before the message stops being useful.

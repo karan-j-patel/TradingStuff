@@ -14,6 +14,16 @@ pub enum EngineError {
     EmptyPanel,
 
     #[error(
+        "the price panel's month-ends jump from {before} to {after}, so an entire calendar month \
+         has no bar on any security. Every window in this engine is expressed as an index offset \
+         into those month-ends, so a gap makes each of them span more calendar time than its name \
+         claims: a one-month forward label would cover two months and a 12-1 momentum window \
+         thirteen, with every figure still plausible. Refused here rather than tolerated, because \
+         a month in which nothing traded anywhere is a missing fetch rather than a quiet market"
+    )]
+    PanelMonthGap { before: Date, after: Date },
+
+    #[error(
         "the panel spans {months} month-ends and a rebalance needs {required} of lead-in \
          before the first one, so no rebalance is possible"
     )]
@@ -136,6 +146,19 @@ pub enum EngineError {
     RebalanceStrideZero,
 
     #[error(
+        "the signal skips {skip_months} months out of a {lookback_months}-month lookback, so the \
+         formation window ends at or before it starts. Measured rather than reasoned about: at a \
+         skip past the lead-in the index arithmetic underflows and panics, and at a skip inside it \
+         the window simply reverses, whereupon the momentum signal returns a BACKWARD return and a \
+         full backtest completes with a Sharpe. A window with nothing in it is a configuration \
+         mistake rather than a signal"
+    )]
+    SignalWindowInverted {
+        lookback_months: usize,
+        skip_months: usize,
+    },
+
+    #[error(
         "the book staleness bound of {days} days does not fit the signed day arithmetic that \
          ages filings, so it would wrap rather than compare; a bound wider than the calendar \
          is a configuration mistake rather than a tolerance"
@@ -242,6 +265,27 @@ pub enum EngineError {
         marketcaps: bool,
         filings: bool,
     },
+
+    #[error(
+        "the characteristic panel export needs cash dividends (attached: {dividends}), classified \
+         delistings (attached: {delistings}), market caps (attached: {marketcaps}) and filings \
+         (attached: {filings}), and at least one is missing here. The configuration and the panel \
+         agree with each other in that state, so nothing before this point refuses it, and the \
+         export would write a whole column of nulls rather than say a dataset was absent"
+    )]
+    ExportMissingInputs {
+        dividends: bool,
+        delistings: bool,
+        marketcaps: bool,
+        filings: bool,
+    },
+
+    #[error(
+        "the characteristic panel export needs {field} and the configuration leaves it unset, so \
+         the column it names has no window; a default invented here would write a characteristic \
+         under a heading that says how long it is and a hash that does not"
+    )]
+    ExportWindowMissing { field: &'static str },
 
     #[error("encoding the configuration for hashing failed")]
     ConfigEncode(#[source] serde_json::Error),

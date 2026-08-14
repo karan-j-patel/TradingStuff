@@ -503,7 +503,16 @@ fn the_door_resolves_exactly_the_pairs_the_registry_lists() {
 fn a_window_with_no_bars_has_no_median_dollar_volume() {
     let m = month_ends();
     let name = asset("ONE", 1);
-    let panel = panel_of(&[(name, vec![(m[0], dec("100")), (m[4], dec("110"))])]);
+    // A second name trading every month, so the PANEL's calendar is
+    // consecutive while ONE's own bars still skip the window under test. A
+    // month in which nothing traded anywhere is a missing fetch that
+    // `Panel::from_bars` refuses; one security going quiet is not. It sorts
+    // after ONE on identity, so ONE is still security 0.
+    let keeper = asset("KEEP", 2);
+    let panel = panel_of(&[
+        (name, vec![(m[0], dec("100")), (m[4], dec("110"))]),
+        (keeper, m.iter().map(|day| (*day, dec("50"))).collect()),
+    ]);
 
     assert_eq!(
         liquidity::median_dollar_volume(&panel, 0, m[1], m[2]).expect("the arithmetic holds"),

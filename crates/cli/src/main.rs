@@ -11,6 +11,9 @@
 //! - `ingest` reports which data providers this machine is configured for.
 //! - `curate` writes validated records to Parquet, and counts no trial for it.
 //!   Three datasets: prices, delistings, and corporate actions.
+//! - `export` writes the characteristic panel, and counts no trial either. It
+//!   is top-level rather than a `diagnose` subcommand because it produces an
+//!   artifact rather than a measurement.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -20,6 +23,7 @@ use clap::{Parser, Subcommand};
 mod backtest;
 mod curate;
 mod diagnose;
+mod export;
 mod gates;
 mod ingest;
 mod status;
@@ -134,6 +138,34 @@ enum Command {
         #[command(subcommand)]
         dataset: curate::Dataset,
     },
+
+    /// Write the characteristic panel every strategy's signal already produces
+    ///
+    /// An artifact rather than a measurement. It ranks nothing, holds nothing,
+    /// computes no return series and no Sharpe, and records no trial. Every
+    /// dataset is required: the panel writes a column per dataset, and one run
+    /// without would write a column of nulls instead of refusing.
+    Export {
+        #[arg(long, default_value = rigor::DEFAULT_PATH, help = TRIAL_LOG_HELP)]
+        trials: String,
+        #[arg(long)]
+        prices: PathBuf,
+        /// Universe JSONL. Its SHA-256 goes into the exporting configuration's
+        /// hash and into the written file's provenance metadata
+        #[arg(long)]
+        universe: PathBuf,
+        #[arg(long)]
+        actions: PathBuf,
+        #[arg(long)]
+        delistings: PathBuf,
+        #[arg(long)]
+        marketcap: PathBuf,
+        #[arg(long)]
+        filings: PathBuf,
+        /// Where the characteristic panel Parquet is written
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -166,6 +198,25 @@ fn main() -> ExitCode {
         Command::Ingest { action } => ingest::run(action.as_ref()),
         Command::Diagnose { what } => diagnose::run(&what),
         Command::Curate { dataset } => curate::run(&dataset),
+        Command::Export {
+            trials,
+            prices,
+            universe,
+            actions,
+            delistings,
+            marketcap,
+            filings,
+            out,
+        } => export::run(
+            &trials,
+            &prices,
+            &universe,
+            &actions,
+            &delistings,
+            &marketcap,
+            &filings,
+            &out,
+        ),
     };
 
     match outcome {
