@@ -29,7 +29,7 @@ use rust_decimal::{Decimal, MathematicalOps};
 
 use crate::config::Weighting;
 use crate::error::EngineError;
-use crate::panel::{ExitMark, Panel};
+use crate::panel::{ExitMark, Panel, Series};
 
 /// How many exits rested on a measurement, on an assumption, and on nothing.
 ///
@@ -359,6 +359,69 @@ pub fn mean_one_way_turnover(traded: &[Decimal]) -> Result<Decimal, EngineError>
         .and_then(|total| total.checked_div(Decimal::from(traded.len())))
         .and_then(|two_way| two_way.checked_div(Decimal::from(2u64)))
         .ok_or_else(|| EngineError::math("averaging turnover"))
+}
+
+/// Total return over `(from, to]`, dividends included, marked at the delisting
+/// convention when the name stops trading inside the window.
+///
+/// The window is half-open at the start: `from`'s close is the denominator and
+/// `from`'s own return is NOT in it. That is the property a forward label needs
+/// and the one an event study gets wrong by folding the event month in.
+///
+/// # Why this lives here and what has not been consolidated
+///
+/// Promoted from `crate::deletions`, which now calls it, because the panel
+/// export's forward label needs the identical arithmetic and a second copy of a
+/// return is how two figures that must agree stop agreeing.
+///
+/// Two other copies remain and are deliberately NOT touched this round:
+///
+/// - [`advance`]'s inline form, which additionally drifts weights and
+///   accumulates a portfolio return, so lifting it would mean either splitting
+///   that loop or giving this function outputs no other caller wants.
+/// - `crate::conservative::monthly_total_return_volatility`'s loop, which walks
+///   a window of month-ends pairwise and needs each step's return rather than
+///   one span's.
+///
+/// Both are named here so the next person consolidating them starts from a list
+/// rather than a grep, and so the deferral is a decision on the record rather
+/// than an oversight.
+///
+/// `None` when either end has no price, when the opening price is not positive,
+/// or when a delisted name has no last close to mark. The `bool` is whether the
+/// name stopped trading inside the window.
+pub fn total_return(
+    series: &Series,
+    from: Date,
+    to: Date,
+) -> Result<Option<(Decimal, bool)>, EngineError> {
+    let Some(open) = series.close_at_month_end(from) else {
+        return Ok(None);
+    };
+    if open <= Decimal::ZERO {
+        return Ok(None);
+    }
+
+    let (close, delisted) = match series.close_at_month_end(to) {
+        Some(close) => (close, false),
+        None => {
+            let Some((last_bar, last)) = series.last_close_on_or_before(to) else {
+                return Ok(None);
+            };
+            let mark = series.exit_mark_in(last_bar, to);
+            match last.checked_mul(mark.terminal_factor()?) {
+                Some(marked) => (marked, true),
+                None => return Ok(None),
+            }
+        }
+    };
+
+    let cash = series.dividend_cash_in(from, to)?;
+    Ok(close
+        .checked_add(cash)
+        .and_then(|marked| marked.checked_div(open))
+        .and_then(|ratio| ratio.checked_sub(Decimal::ONE))
+        .map(|value| (value, delisted)))
 }
 
 /// Apply a cost to a return, both expressed as fractions.

@@ -48,7 +48,8 @@ use jiff::civil::Date;
 use rust_decimal::Decimal;
 
 use crate::error::EngineError;
-use crate::panel::{Panel, Series};
+use crate::panel::Panel;
+use crate::portfolio::total_return;
 
 /// Printed with every probe, so a transcript explains itself.
 pub const NOT_A_TRIAL: &str = "\
@@ -250,52 +251,6 @@ fn rank_of(ranks: &[(usize, usize)], security: usize) -> Option<usize> {
         .iter()
         .find(|(index, _)| *index == security)
         .map(|(_, rank)| *rank)
-}
-
-/// Total return over `(from, to]`, dividends included.
-///
-/// The window is half-open at the start, so the month the event happened
-/// contributes its closing price as the denominator and NOT its own return. The
-/// event month is the selling-pressure month; folding it into the measurement
-/// is the classic way a study like this flatters itself, and `x_d4` is the pin.
-///
-/// A name that stops trading inside the window is marked at its last close
-/// times the delisting factor the run is configured with, which is what
-/// `crate::portfolio::advance` does for a held position. Returning `None`
-/// instead would silently drop exactly the events the sensitivity split exists
-/// to show.
-fn total_return(
-    series: &Series,
-    from: Date,
-    to: Date,
-) -> Result<Option<(Decimal, bool)>, EngineError> {
-    let Some(open) = series.close_at_month_end(from) else {
-        return Ok(None);
-    };
-    if open <= Decimal::ZERO {
-        return Ok(None);
-    }
-
-    let (close, delisted) = match series.close_at_month_end(to) {
-        Some(close) => (close, false),
-        None => {
-            let Some((last_bar, last)) = series.last_close_on_or_before(to) else {
-                return Ok(None);
-            };
-            let mark = series.exit_mark_in(last_bar, to);
-            match last.checked_mul(mark.terminal_factor()?) {
-                Some(marked) => (marked, true),
-                None => return Ok(None),
-            }
-        }
-    };
-
-    let cash = series.dividend_cash_in(from, to)?;
-    Ok(close
-        .checked_add(cash)
-        .and_then(|marked| marked.checked_div(open))
-        .and_then(|ratio| ratio.checked_sub(Decimal::ONE))
-        .map(|value| (value, delisted)))
 }
 
 /// Run the probe over a panel.
