@@ -18,6 +18,7 @@
 mod accounting;
 mod baselines;
 mod conservative;
+mod deletions;
 mod delistings;
 mod dividends;
 mod eligibility;

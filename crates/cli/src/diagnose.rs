@@ -18,7 +18,7 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Subcommand;
-use engine::turnover;
+use engine::{deletions, turnover};
 use rigor::TrialLog;
 
 use crate::backtest::{Attachments, build_panel, resolve};
@@ -50,32 +50,187 @@ pub enum What {
         #[arg(long)]
         marketcap: Option<PathBuf>,
     },
+
+    /// Probe whether names dropping out of a synthetic large-cap set rebound
+    ///
+    /// Not a backtest. It computes returns against a matched control and no
+    /// Sharpe, and records no trial: the hypothesis is declared separately
+    /// through the backtest command's --config door.
+    Deletions {
+        #[arg(long, default_value = rigor::DEFAULT_PATH)]
+        trials: String,
+        /// Research program whose universe and cost constants frame the probe.
+        /// Nothing is backtested; this only resolves the dataset wiring
+        #[arg(long)]
+        program: String,
+        #[arg(long)]
+        prices: PathBuf,
+        #[arg(long)]
+        universe: PathBuf,
+        #[arg(long)]
+        actions: PathBuf,
+        #[arg(long)]
+        delistings: PathBuf,
+        #[arg(long)]
+        marketcap: PathBuf,
+    },
 }
 
 pub fn run(what: &What) -> anyhow::Result<ExitCode> {
-    let What::Turnover {
-        trials,
-        program,
-        variant,
-        prices,
-        universe,
-        actions,
-        delistings,
-        marketcap,
-    } = what;
-
-    let text = turnover_report(
-        trials,
-        program,
-        variant.as_deref(),
-        prices,
-        universe,
-        actions.as_deref(),
-        delistings.as_deref(),
-        marketcap.as_deref(),
-    )?;
+    let text = match what {
+        What::Turnover {
+            trials,
+            program,
+            variant,
+            prices,
+            universe,
+            actions,
+            delistings,
+            marketcap,
+        } => turnover_report(
+            trials,
+            program,
+            variant.as_deref(),
+            prices,
+            universe,
+            actions.as_deref(),
+            delistings.as_deref(),
+            marketcap.as_deref(),
+        )?,
+        What::Deletions {
+            trials,
+            program,
+            prices,
+            universe,
+            actions,
+            delistings,
+            marketcap,
+        } => deletions_report(
+            trials, program, prices, universe, actions, delistings, marketcap,
+        )?,
+    };
     println!("{text}");
     Ok(ExitCode::SUCCESS)
+}
+
+/// The deletion probe as text.
+///
+/// Returned rather than printed, on the rule `turnover_report` follows, so a
+/// test can assert on what it says without capturing stdout.
+///
+/// All four datasets are required rather than optional. The ranking needs market
+/// caps, the returns need dividends to be total returns, and the delisting
+/// treatment is what makes the sensitivity split mean anything. A probe run
+/// without one of them would answer a different question under the same name.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deletions_report(
+    trials: &str,
+    program: &str,
+    prices: &Path,
+    universe: &Path,
+    actions: &Path,
+    delistings: &Path,
+    marketcap: &Path,
+) -> anyhow::Result<String> {
+    // Read, never written. `x_d5` is the test that holds it.
+    let log =
+        TrialLog::load(trials).with_context(|| format!("loading the trial log from {trials}"))?;
+
+    let attachments = Attachments::read(Some(actions), Some(delistings), Some(marketcap), None)?;
+    let (config, members) = resolve(program, None, universe, Some(delistings), &attachments)?;
+    let panel = build_panel(prices, attachments, &members)?;
+    let probe = deletions::probe(&panel)?;
+
+    let mut lines = vec![
+        format!("Index-deletion probe, universe of {program}"),
+        format!("  universe file sha256:  {}", config.universe_sha256),
+        format!(
+            "  trials standing behind this log: lifetime {}, {program} {}",
+            log.lifetime_count(),
+            log.count_for(program)
+        ),
+        String::new(),
+        format!("  {}", deletions::NOT_A_TRIAL),
+        String::new(),
+        format!("  {}", deletions::POWER_CEILING),
+        String::new(),
+        format!(
+            "Synthetic set: top {} by market cap, recomputed monthly. A deletion is a \
+             name ranked",
+            deletions::TOP_N
+        ),
+        format!(
+            "  {} or better at m-1 and past {} at m, still trading at m. Controls come from \
+             ranks",
+            deletions::TOP_N,
+            deletions::BUFFER_RANK
+        ),
+        format!(
+            "  {}..={} at m-1, matched on the trailing {}-month return.",
+            deletions::CONTROL_RANKS.start(),
+            deletions::CONTROL_RANKS.end(),
+            deletions::TRAILING_MONTHS
+        ),
+        String::new(),
+        format!("  deletion events:                 {}", probe.events.len()),
+        format!(
+            "  exits by delisting, not deletions: {}",
+            probe.delisting_exits
+        ),
+        String::new(),
+        "Excess return over the matched control, diagnostic. Both sides of the".to_string(),
+        "sensitivity split are shown; neither is the headline.".to_string(),
+    ];
+
+    for months in deletions::WINDOWS {
+        for (label, include) in [("excluding", false), ("including", true)] {
+            let summary = probe.summarise(*months, include);
+            lines.push(format!(
+                "  (m, m+{months}], {label} in-window delistings: n {}   mean {}   median {}   \
+                 spread {}",
+                summary.events,
+                show_option(summary.mean),
+                show_option(summary.median),
+                show_option(summary.spread),
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("Every event, so the aggregates above can be checked against them.".to_string());
+    if probe.events.is_empty() {
+        lines.push("  none".to_string());
+    }
+    for event in &probe.events {
+        let windows: Vec<String> = event
+            .windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "+{}m event {} control {}{}",
+                    window.months,
+                    show_option(window.event),
+                    show_option(window.control),
+                    if window.delisted_in_window {
+                        " (delisted in window)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect();
+        lines.push(format!(
+            "  {} {:<8} rank {} -> {}   control {:<8} {}",
+            event.date,
+            event.ticker,
+            event.rank_before,
+            event.rank_after,
+            event.control.as_deref().unwrap_or("none"),
+            windows.join("   ")
+        ));
+    }
+
+    Ok(lines.join("\n"))
 }
 
 /// The whole diagnostic as text.
@@ -159,4 +314,13 @@ pub(crate) fn turnover_report(
 
 fn show(value: rust_decimal::Decimal) -> String {
     value.round_dp(6).normalize().to_string()
+}
+
+/// A figure that may not exist, printed as absent rather than as a zero.
+///
+/// Substituting a number here would be inventing the one thing this project
+/// exists to stop being invented, and on a probe with small counts the absent
+/// case is common rather than exotic.
+fn show_option(value: Option<rust_decimal::Decimal>) -> String {
+    value.map_or_else(|| "none".to_string(), show)
 }

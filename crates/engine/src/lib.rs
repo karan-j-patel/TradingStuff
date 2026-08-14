@@ -38,10 +38,13 @@
 //! - [`run`] is the monthly loop and the report it produces.
 //! - [`turnover`] replays formations only, for the book-size diagnostic. It
 //!   computes no return and records no trial.
+//! - [`deletions`] probes one user-originated hypothesis about index deletions.
+//!   It computes returns and no Sharpe, and records no trial itself.
 
 pub mod baseline;
 pub mod config;
 pub mod conservative;
+pub mod deletions;
 pub mod error;
 pub mod liquidity;
 pub mod lowvol;

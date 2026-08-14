@@ -215,3 +215,138 @@ fn a_security_with_no_permaticker_is_refused() {
         "the run failed for some other reason: {error:#}"
     );
 }
+
+/// The four datasets the deletion probe requires, over the shared 40-name
+/// fixture.
+///
+/// Forty names against a top-fifty set means every name is inside it and none
+/// can fall past the rank-sixty buffer, so this fixture produces no events. That
+/// is deliberate: `x_d5` is about the trial log, and event detection is pinned
+/// in the engine where a seventy-name fixture costs nothing to generate.
+fn deletion_dataset(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let (prices, universe) = dataset(name);
+    let dir = std::env::temp_dir().join(format!("diagnose-cli-{name}"));
+
+    let days: Vec<Date> = (0..20)
+        .map(|step: i16| {
+            date(
+                2020 + step / 12,
+                i8::try_from(step % 12).expect("month fits") + 1,
+                28,
+            )
+        })
+        .collect();
+    let key = |permaticker: u64| AssetKey {
+        ticker: format!("T{permaticker:03}"),
+        permanent: Some(PermanentId::Sharadar(permaticker)),
+    };
+
+    let caps: Vec<ingest::MarketCapRecord> = (1..=40u64)
+        .flat_map(|permaticker| {
+            days.iter().map(move |day| ingest::MarketCapRecord {
+                asset: key(permaticker),
+                date: *day,
+                marketcap: Decimal::from((41 - permaticker) * 1000),
+                source: "Synthetic".to_string(),
+            })
+        })
+        .collect();
+    let marketcap = dir.join("marketcap.parquet");
+    ingest::parquet::write_marketcap(caps, &marketcap, "Synthetic")
+        .expect("writing the fixture market caps");
+
+    // One row each, because the writers refuse an empty dataset and a probe
+    // needs both attached to mean what it says.
+    let actions = dir.join("actions.parquet");
+    ingest::parquet::write_actions(
+        vec![ingest::ActionRecord {
+            asset: key(1),
+            effective: days[2],
+            action: ingest::CorporateAction::Dividend {
+                amount: Decimal::from(1u64),
+                kind: ingest::DividendKind::Cash,
+            },
+            source: "Synthetic".to_string(),
+        }],
+        &actions,
+        "Synthetic",
+    )
+    .expect("writing the fixture actions");
+
+    let delistings = dir.join("delistings.parquet");
+    ingest::parquet::write_delistings(
+        vec![ingest::Delisting {
+            asset: key(40),
+            date: days[19],
+            reason: ingest::DelistingReason::Bankruptcy,
+            listing: ingest::Listing::Other,
+            terminal: ingest::TerminalValue::Unknown,
+            final_market_cap: None,
+            source: "Synthetic".to_string(),
+        }],
+        &delistings,
+        "Synthetic",
+    )
+    .expect("writing the fixture delistings");
+
+    (prices, universe, actions, delistings, marketcap)
+}
+
+/// X-D5. The deletion probe leaves the trial log byte-identical.
+///
+/// # Why the bytes rather than the count
+///
+/// An append followed by anything that removed a line keeps the count and
+/// changes the record. The file is small, so comparing it whole is what being
+/// sure costs.
+///
+/// The probe is the one tool here whose hypothesis IS counted, through the
+/// backtest command's `--config` door as a separate deliberate step. That makes
+/// the log-untouched property more load-bearing than for the turnover
+/// diagnostic, not less: if the probe also appended, the hypothesis would be
+/// recorded twice and the lifetime count would drift for a reason nobody could
+/// reconstruct.
+#[test]
+fn x_d5_the_deletion_probe_records_no_trial() {
+    let path = temp_log("deletions-untouched");
+    let before = fs::read(&path).expect("reading the seeded log");
+    let (prices, universe, actions, delistings, marketcap) =
+        deletion_dataset("deletions-untouched");
+
+    let text = deletions_report(
+        &path,
+        engine::PROGRAM,
+        &prices,
+        &universe,
+        &actions,
+        &delistings,
+        &marketcap,
+    )
+    .expect("the fixture probes");
+
+    assert_eq!(
+        fs::read(&path).expect("reading the log after"),
+        before,
+        "the deletion probe changed the trial log, so the hypothesis would be \
+         recorded twice: once by the declaration and once by the tool"
+    );
+    assert!(
+        text.contains(engine::deletions::NOT_A_TRIAL),
+        "the output does not carry the ruling that this is not a trial, got {text}"
+    );
+    assert!(
+        text.contains(engine::deletions::POWER_CEILING),
+        "the output does not carry the power ceiling, so a reader can meet the \
+         result without meeting what it cannot support, got {text}"
+    );
+    // The word appears only inside the disclaimer that denies it. Written as
+    // "strip the disclaimer, then look" rather than as a bare substring test,
+    // because the disclaimer says "computes no Sharpe" and a naive search
+    // forbids the sentence that makes the guarantee.
+    let without_disclaimer = text.replace(engine::deletions::NOT_A_TRIAL, "");
+    assert!(
+        !without_disclaimer.contains("Sharpe"),
+        "the probe printed a Sharpe outside the disclaimer that denies it, got \
+         {without_disclaimer}"
+    );
+}
