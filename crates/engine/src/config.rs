@@ -52,6 +52,14 @@ pub const CONSERVATIVE_PROGRAM: &str = "conservative-v0";
 /// scoped `N`.
 pub const VALUE_PROGRAM: &str = "value-v0";
 
+/// The research program identifier the ridge configuration belongs to.
+///
+/// A fifth program on the rule the other four follow. A fitted linear model over
+/// every characteristic at once is a different hypothesis from any single
+/// characteristic on its own, and rule 5 names the linear model as the baseline
+/// the machine-learning families must beat, so it carries its own scoped `N`.
+pub const RIDGE_PROGRAM: &str = "ridge-v0";
+
 /// The variant of [`LOWVOL_PROGRAM`] that raises the price floor to $10.
 pub const VARIANT_PRICE_FLOOR_10: &str = "price-floor-10";
 
@@ -103,6 +111,7 @@ pub const RUNNABLE: &[(&str, Option<&str>)] = &[
     (LOWVOL_PROGRAM, Some(VARIANT_VALUE_WEIGHTED)),
     (CONSERVATIVE_PROGRAM, None),
     (VALUE_PROGRAM, None),
+    (RIDGE_PROGRAM, None),
 ];
 
 /// How much of the portfolio each held name gets.
@@ -167,6 +176,21 @@ pub enum Strategy {
     /// rather than of a name. So the conservative arm owns its selection path
     /// instead of the two being forced into one shape prematurely.
     ConservativeFormula,
+    /// Hold the highest quintile by a fitted model's predicted next-month
+    /// return, read from an attached predictions file.
+    ///
+    /// A scalar signal like momentum and value, so it takes the shared
+    /// sort-then-slice path, descending, and holds the names the model likes
+    /// most. What is new is where the number comes from: nothing computes it,
+    /// it is read. That is why the predictions file's digest is in the hash and
+    /// why the wiring guard refuses a ridge run with none attached — the
+    /// signal is not a property of the price data and cannot be recomputed
+    /// from it.
+    ///
+    /// A name with no prediction at a formation is not rankable and leaves the
+    /// field before the quintile is taken, exactly as a name with no filing
+    /// does under [`Strategy::Value`].
+    Ridge,
     /// Hold the highest quintile by book-to-market: accounting equity over
     /// market equity, both as of the formation date.
     ///
@@ -390,6 +414,23 @@ pub struct BacktestConfig {
     /// under an identical rule.
     pub filings_sha256: Option<String>,
 
+    /// SHA-256 of the curated prices file.
+    ///
+    /// `Option` only because a configuration can be built before the file is
+    /// read; every run through the command line records one. It reaches the
+    /// hash like the others, and it is what a predictions file's embedded
+    /// provenance is bound against at the engine door.
+    pub prices_sha256: Option<String>,
+
+    /// SHA-256 of the predictions file, when one was supplied.
+    ///
+    /// Same rules as [`BacktestConfig::filings_sha256`], and it matters more
+    /// here than for any other dataset. The ridge signal is not computed from
+    /// anything on disk, it IS the file, so two runs over two different fits of
+    /// the same model are two hypotheses and the digest is the only thing that
+    /// tells them apart.
+    pub predictions_sha256: Option<String>,
+
     /// How many days after its publication a filing may still be used.
     ///
     /// `Some(548)` for the value program, `None` for every program that reads no
@@ -460,6 +501,7 @@ impl BacktestConfig {
             }),
             (CONSERVATIVE_PROGRAM, None) => Some(Self::conservative_v0(universe_sha256)),
             (VALUE_PROGRAM, None) => Some(Self::value_v0(universe_sha256)),
+            (RIDGE_PROGRAM, None) => Some(Self::ridge_v0(universe_sha256)),
             // Listed in the registry with nothing to build. Unreachable while
             // the two agree, and the registry walk in the CLI tests is what
             // notices when they stop agreeing.
@@ -497,6 +539,8 @@ impl BacktestConfig {
             payout_dividend_trailing_months: None,
             size_floor_fraction: None,
             filings_sha256: None,
+            prices_sha256: None,
+            predictions_sha256: None,
             book_staleness_days: None,
         }
     }
@@ -613,6 +657,21 @@ impl BacktestConfig {
             payout_share_average_months: Some(24),
             payout_dividend_trailing_months: Some(12),
             book_staleness_days: Some(548),
+            ..Self::momentum_v0(universe_sha256)
+        }
+    }
+
+    /// The ridge configuration.
+    ///
+    /// Every constant is momentum's, deliberately, so the difference between
+    /// this trial and the single-signal ones is the signal and not the
+    /// scaffolding: the same price floor, the same coverage rule, the same
+    /// quintile, equal weight, monthly. That is what makes rule 5's real
+    /// question here answerable, which is whether the combination beats its
+    /// parts rather than whether it was screened differently.
+    pub fn ridge_v0(universe_sha256: impl Into<String>) -> Self {
+        Self {
+            strategy: Strategy::Ridge,
             ..Self::momentum_v0(universe_sha256)
         }
     }

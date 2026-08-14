@@ -23,6 +23,7 @@
 //! which are the readers most likely to assume a column named `close` is the
 //! price something traded at.
 
+use bytes::Bytes;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -201,8 +202,23 @@ fn decimals(values: Vec<i128>) -> Result<ArrayRef, CurateError> {
 /// and reading it anyway would be the exact mistake [`AdjustedBar`] exists to
 /// make impossible in memory.
 pub fn read_prices(path: &Path) -> Result<Vec<AdjustedBar>, CurateError> {
-    let file = super::open(path)?;
-    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+    decode(super::open(path)?)
+}
+
+/// The same read, from bytes already in memory.
+///
+/// Added when the panel export began recording the prices digest in its
+/// provenance. See the `read_from_bytes` section of [`super`]: hashing one read
+/// of a path and parsing a second does not support the claim that the recorded
+/// digest describes the rows that were used.
+pub fn read_prices_from_bytes(bytes: Bytes) -> Result<Vec<AdjustedBar>, CurateError> {
+    decode(bytes)
+}
+
+fn decode<R: ::parquet::file::reader::ChunkReader + 'static>(
+    source: R,
+) -> Result<Vec<AdjustedBar>, CurateError> {
+    let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(source)?;
 
     provenance_of(builder.metadata().file_metadata().key_value_metadata())?;
 

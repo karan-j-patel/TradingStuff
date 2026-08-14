@@ -60,6 +60,7 @@ mod error;
 mod filings;
 mod marketcap;
 mod panel;
+mod predictions;
 mod prices;
 
 #[cfg(test)]
@@ -83,8 +84,14 @@ pub use panel::{
     CONFIG_HASH_KEY, DIGEST_KEYS, PanelProvenance, PanelRow, panel_provenance, read_panel,
     read_panel_from_bytes, write_panel,
 };
+pub use predictions::{
+    PANEL_SHA256_KEY, PredictionRow, PredictionsProvenance, predictions_provenance,
+    predictions_provenance_from_bytes, read_predictions, read_predictions_from_bytes,
+    write_predictions,
+};
 pub use prices::{
-    BASIS, BASIS_KEY, Provenance, SOURCE_KEY, prices_provenance, read_prices, write_prices,
+    BASIS, BASIS_KEY, Provenance, SOURCE_KEY, prices_provenance, read_prices,
+    read_prices_from_bytes, write_prices,
 };
 
 use crate::schema::AssetKey;
@@ -136,9 +143,16 @@ pub fn filings_path(data_root: &Path) -> PathBuf {
 }
 
 /// The characteristic panel. Written by the engine's export, read by the fit
-/// script, and the only curated file this codebase produces rather than fetches.
+/// script, and one of the two curated files this codebase produces rather than
+/// fetches.
 pub fn panel_path(data_root: &Path) -> PathBuf {
     data_root.join("curated/panel/panel.parquet")
+}
+
+/// The fitted model's predictions. Written by the fit script, ranked on by the
+/// engine, and the other file this codebase produces rather than fetches.
+pub fn predictions_path(data_root: &Path) -> PathBuf {
+    data_root.join("curated/predictions/predictions.parquet")
 }
 
 /// How many rejected records to name before the message stops being useful.

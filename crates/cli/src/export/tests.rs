@@ -279,6 +279,7 @@ fn the_written_panel_names_the_configuration_and_the_five_files_it_read() {
     assert_eq!(provenance.marketcap_sha256, sha(&fixture.marketcap));
     assert_eq!(provenance.filings_sha256, sha(&fixture.filings));
     assert_eq!(provenance.universe_sha256, sha(&fixture.universe));
+    assert_eq!(provenance.prices_sha256, sha(&fixture.prices));
 
     let expected = engine::BacktestConfig {
         actions_sha256: Some(provenance.actions_sha256.clone()),
@@ -286,6 +287,7 @@ fn the_written_panel_names_the_configuration_and_the_five_files_it_read() {
         delistings_sha256: Some(provenance.delistings_sha256.clone()),
         marketcap_sha256: Some(provenance.marketcap_sha256.clone()),
         filings_sha256: Some(provenance.filings_sha256.clone()),
+        prices_sha256: Some(provenance.prices_sha256.clone()),
         ..engine::BacktestConfig::panel_export(provenance.universe_sha256.clone())
     };
     assert_eq!(

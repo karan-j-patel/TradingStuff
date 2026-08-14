@@ -136,9 +136,16 @@ pub(crate) fn deletions_report(
     let log =
         TrialLog::load(trials).with_context(|| format!("loading the trial log from {trials}"))?;
 
-    let attachments = Attachments::read(Some(actions), Some(delistings), Some(marketcap), None)?;
+    let attachments = Attachments::read(
+        prices,
+        Some(actions),
+        Some(delistings),
+        Some(marketcap),
+        None,
+        None,
+    )?;
     let (config, members) = resolve(program, None, universe, Some(delistings), &attachments)?;
-    let panel = build_panel(prices, attachments, &members)?;
+    let panel = build_panel(attachments, &members)?;
     let probe = deletions::probe(&panel)?;
 
     let mut lines = vec![
@@ -258,9 +265,9 @@ pub(crate) fn turnover_report(
     // No filings. The turnover diagnostic replays formations of whatever
     // program it is pointed at, and a value program pointed here would refuse
     // for want of them, which is the correct answer rather than a gap.
-    let attachments = Attachments::read(actions, delistings, marketcap, None)?;
+    let attachments = Attachments::read(prices, actions, delistings, marketcap, None, None)?;
     let (config, members) = resolve(program, variant, universe, delistings, &attachments)?;
-    let panel = build_panel(prices, attachments, &members)?;
+    let panel = build_panel(attachments, &members)?;
 
     // The engine carves each sub-universe out of the full panel itself and
     // refuses a security it cannot place. The filtered panel never crosses the

@@ -19,6 +19,17 @@ use rust_decimal::Decimal;
 /// these tests never touch the real scientific record.
 const GENESIS: &str = r#"{"config_hash":"0000000000000000000000000000000000000000000000000000000000000000","entry_hash":"bbdc8721955c4bb3f0ba915f1306070895d598345f3f5308d09cd78093af6db5","prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","program":"genesis","sharpe":null,"timestamp":"2026-08-08T00:00:00Z"}"#;
 
+/// The prices digest a run records, which the configuration hash now covers.
+///
+/// Every expectation below has to include it or it is hashing a configuration
+/// no run produces. Read from the fixture file rather than pinned, so a changed
+/// fixture moves the expectation with it.
+fn prices_digest(path: &std::path::Path) -> Option<String> {
+    Some(rigor::hash_bytes(
+        &fs::read(path).expect("reading fixture prices"),
+    ))
+}
+
 fn temp_log(name: &str) -> String {
     let path = std::env::temp_dir().join(format!("trials-{name}.jsonl"));
     fs::write(&path, format!("{GENESIS}\n")).expect("seeding a temp log");
@@ -213,7 +224,10 @@ fn e7_a_run_appends_one_entry_carrying_the_engine_sharpe() {
     let before = TrialLog::load(&path).expect("load").lifetime_count();
 
     let text = fs::read_to_string(&universe).expect("read universe");
-    let config = BacktestConfig::momentum_v0(rigor::hash_bytes(text.as_bytes()));
+    let config = BacktestConfig {
+        prices_sha256: prices_digest(&prices),
+        ..BacktestConfig::momentum_v0(rigor::hash_bytes(text.as_bytes()))
+    };
     let panel = Panel::from_bars(fixture_bars()).expect("panel builds");
     let expected = engine::backtest(&panel, &config)
         .expect("the fixture backtests")
@@ -231,6 +245,7 @@ fn e7_a_run_appends_one_entry_carrying_the_engine_sharpe() {
             delistings: None,
             marketcap: None,
             filings: None,
+            predictions: None,
         },
     )
     .expect("the momentum backtest runs");
@@ -280,6 +295,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
             delistings: None,
             marketcap: None,
             filings: None,
+            predictions: None,
         },
     )
     .expect("first run");
@@ -308,6 +324,7 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
             delistings: None,
             marketcap: None,
             filings: None,
+            predictions: None,
         },
     )
     .expect("second run");
@@ -328,10 +345,13 @@ fn e7_the_recorded_config_hash_follows_the_universe_file() {
     );
     assert_eq!(
         entries[1].config_hash,
-        BacktestConfig::momentum_v0(rigor::hash_bytes(renamed.as_bytes()))
-            .config_hash()
-            .expect("hashes")
-            .as_str(),
+        BacktestConfig {
+            prices_sha256: prices_digest(&prices),
+            ..BacktestConfig::momentum_v0(rigor::hash_bytes(renamed.as_bytes()))
+        }
+        .config_hash()
+        .expect("hashes")
+        .as_str(),
         "the recorded hash is not the hash of the configuration the second run used"
     );
 }
@@ -360,6 +380,7 @@ fn an_engine_failure_still_records_a_trial() {
             delistings: None,
             marketcap: None,
             filings: None,
+            predictions: None,
         },
     )
     .expect("a failed engine is still a completed command");
@@ -402,6 +423,7 @@ fn an_unresolvable_configuration_still_records_a_trial() {
             delistings: None,
             marketcap: None,
             filings: None,
+            predictions: None,
         },
     )
     .expect("a failed engine is still a completed command");
@@ -422,7 +444,17 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
     let marketcap = PathBuf::from("marketcap.parquet");
 
     assert!(matches!(
-        Strategy::from_args(Some("free text"), None, None, None, None, None, None, None),
+        Strategy::from_args(
+            Some("free text"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None
+        ),
         Ok(Strategy::Declared(_))
     ));
     assert!(matches!(
@@ -431,6 +463,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             None,
             Some(&prices),
             Some(&universe),
+            None,
             None,
             None,
             None,
@@ -450,6 +483,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             Some(&prices),
             Some(&universe),
             Some(&actions),
+            None,
             None,
             None,
             None
@@ -470,6 +504,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             None,
             Some(&delistings),
             None,
+            None,
             None
         ),
         Ok(Strategy::Momentum {
@@ -488,6 +523,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             None,
             None,
             Some(&marketcap),
+            None,
             None
         ),
         Ok(Strategy::Momentum {
@@ -498,13 +534,24 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
         })
     ));
     for bad in [
-        Strategy::from_args(None, None, None, None, None, None, None, None),
-        Strategy::from_args(None, None, Some(&prices), None, None, None, None, None),
+        Strategy::from_args(None, None, None, None, None, None, None, None, None),
+        Strategy::from_args(
+            None,
+            None,
+            Some(&prices),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
         Strategy::from_args(
             Some("free text"),
             None,
             Some(&prices),
             Some(&universe),
+            None,
             None,
             None,
             None,
@@ -521,6 +568,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             None,
             None,
             None,
+            None,
         ),
         // Delistings with no engine behind them, the same failure one dataset
         // over. The recorded hash would name the imputation convention while
@@ -532,6 +580,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             None,
             None,
             Some(&delistings),
+            None,
             None,
             None,
         ),
@@ -547,6 +596,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
             None,
             Some(&marketcap),
             None,
+            None,
         ),
         // A variant with no engine behind it, which clap does not refuse on its
         // own. Measured 2026-08-11: `--config` conflicts with `--prices`, and
@@ -556,6 +606,7 @@ fn the_strategy_arguments_are_either_a_config_or_a_dataset() {
         Strategy::from_args(
             Some("free text"),
             Some("price-floor-10"),
+            None,
             None,
             None,
             None,
@@ -727,6 +778,7 @@ fn e11j_the_recorded_hash_moves_when_delistings_are_supplied() {
                 delistings: supplied.map(PathBuf::as_path),
                 marketcap: None,
                 filings: None,
+                predictions: None,
             },
         )
         .expect("the momentum backtest runs");
@@ -788,6 +840,7 @@ fn e11k_the_recorded_hash_follows_the_delistings_file() {
                 delistings: Some(delistings.as_path()),
                 marketcap: None,
                 filings: None,
+                predictions: None,
             },
         )
         .expect("the momentum backtest runs")
@@ -915,6 +968,7 @@ fn e11l_the_recorded_hash_is_over_the_delistings_bytes_not_its_records() {
                 delistings: Some(file.as_path()),
                 marketcap: None,
                 filings: None,
+                predictions: None,
             },
         )
         .expect("the momentum backtest runs");
@@ -963,6 +1017,7 @@ fn e8g_the_recorded_hash_moves_when_actions_are_supplied() {
                 delistings: None,
                 marketcap: None,
                 filings: None,
+                predictions: None,
             },
         )
         .expect("the momentum backtest runs");
@@ -1060,6 +1115,7 @@ fn the_program_selects_the_configuration_the_run_is_recorded_under() {
                 delistings: None,
                 marketcap: None,
                 filings: None,
+                predictions: None,
             },
         )
         .expect("the backtest runs");
@@ -1070,8 +1126,14 @@ fn the_program_selects_the_configuration_the_run_is_recorded_under() {
     let entries = log.trials();
     assert_eq!(entries.len(), 2);
     for (entry, expected) in entries.iter().zip([
-        BacktestConfig::momentum_v0(&sha256),
-        BacktestConfig::lowvol_v0(&sha256),
+        BacktestConfig {
+            prices_sha256: prices_digest(&prices),
+            ..BacktestConfig::momentum_v0(&sha256)
+        },
+        BacktestConfig {
+            prices_sha256: prices_digest(&prices),
+            ..BacktestConfig::lowvol_v0(&sha256)
+        },
     ]) {
         assert_eq!(
             entry.config_hash,
@@ -1109,6 +1171,7 @@ fn an_unknown_program_produces_no_figure() {
             delistings: None,
             marketcap: None,
             filings: None,
+            predictions: None,
         },
     )
     .expect("a refused configuration is still a completed command");
@@ -1160,6 +1223,7 @@ fn e10c_a_variant_reaches_the_log_as_the_bare_program() {
                 delistings: None,
                 marketcap: None,
                 filings: None,
+                predictions: None,
             },
         )
         .expect("the backtest runs");
@@ -1196,6 +1260,7 @@ fn e10c_a_variant_reaches_the_log_as_the_bare_program() {
         entries[1].config_hash,
         BacktestConfig {
             liquidity_floor_fraction: Some(Decimal::from_str_exact("0.2").expect("literal")),
+            prices_sha256: prices_digest(&prices),
             ..BacktestConfig::lowvol_v0(&sha256)
         }
         .config_hash()
@@ -1218,7 +1283,17 @@ fn e10c_a_variant_reaches_the_log_as_the_bare_program() {
 /// larger market cap, so a size screen that drops the small half drops `BBB`.
 /// The market caps are a fixed multiple of the close for both, which leaves the
 /// share ratio at exactly one and the payout leg reading dividends alone.
-fn registry_dataset(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+fn registry_dataset(
+    name: &str,
+) -> (
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+) {
     let dir = std::env::temp_dir().join(format!("backtest-cli-{name}"));
     fs::create_dir_all(&dir).expect("creating the fixture directory");
 
@@ -1341,14 +1416,88 @@ fn registry_dataset(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf,
     ingest::parquet::write_filings(filings, &filings_path, "Synthetic")
         .expect("writing the fixture filings");
 
+    // The ridge program ranks on a file rather than on anything computable, so
+    // the registry walk has to supply one or that pair fails for want of a
+    // signal. A per-name constant is enough: this test asks whether every
+    // registered pair is runnable and hashes distinctly, not what it holds.
+    let mut predictions = Vec::new();
+    for (permaticker, ticker) in [(1u64, "AAA"), (2, "BBB"), (3, "CCC"), (4, "DDD")] {
+        for day in &days {
+            predictions.push(ingest::PredictionRow {
+                asset: AssetKey {
+                    ticker: ticker.to_string(),
+                    permanent: Some(PermanentId::Sharadar(permaticker)),
+                },
+                month_end: *day,
+                predicted_return_1m: Decimal::from(permaticker)
+                    .checked_div(Decimal::from(100u64))
+                    .expect("a small literal divides"),
+            });
+        }
+    }
+    let predictions_path = dir.join("predictions.parquet");
+    let actions_path = fixture_actions(name);
+    let delistings_path = fixture_delistings(name);
+    ingest::parquet::write_predictions(
+        predictions,
+        &predictions_path,
+        &fixture_predictions_provenance(
+            &universe,
+            &prices,
+            &actions_path,
+            &delistings_path,
+            &marketcap,
+            &filings_path,
+        ),
+    )
+    .expect("writing the fixture predictions");
+
     (
         prices,
         universe,
-        fixture_actions(name),
-        fixture_delistings(name),
+        actions_path,
+        delistings_path,
         marketcap,
         filings_path,
+        predictions_path,
     )
+}
+
+/// A provenance block in the shape the fit writes: the panel's seven keys
+/// passed through, plus the panel file's own digest.
+///
+/// The six dataset digests are the REAL ones of the fixture files, not
+/// placeholders. The engine binds a predictions file's embedded provenance
+/// against the digests the run reads, so a block of invented values is refused,
+/// which is exactly what that guard is for.
+///
+/// `config_hash` and `panel_sha256` stay placeholders: neither is compared at
+/// the engine door, because a ridge run's configuration differs from the
+/// export's by construction and no panel file is among a backtest's inputs.
+#[allow(clippy::too_many_arguments)]
+fn fixture_predictions_provenance(
+    universe: &std::path::Path,
+    prices: &std::path::Path,
+    actions: &std::path::Path,
+    delistings: &std::path::Path,
+    marketcap: &std::path::Path,
+    filings: &std::path::Path,
+) -> ingest::PredictionsProvenance {
+    let digest = |path: &std::path::Path| {
+        rigor::hash_bytes(&fs::read(path).expect("reading a fixture input"))
+    };
+    ingest::PredictionsProvenance {
+        panel: ingest::PanelProvenance {
+            config_hash: "c".repeat(64),
+            universe_sha256: digest(universe),
+            prices_sha256: digest(prices),
+            actions_sha256: digest(actions),
+            delistings_sha256: digest(delistings),
+            marketcap_sha256: digest(marketcap),
+            filings_sha256: digest(filings),
+        },
+        panel_sha256: "6".repeat(64),
+    }
 }
 
 /// E10d. Every runnable pair records a distinct configuration under the bare
@@ -1362,7 +1511,7 @@ fn registry_dataset(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf,
 #[test]
 fn e10d_every_runnable_pair_hashes_distinctly() {
     let path = temp_log("registry-walk");
-    let (prices, universe, actions, delistings, marketcap, filings) =
+    let (prices, universe, actions, delistings, marketcap, filings, predictions) =
         registry_dataset("registry-walk");
 
     for (program, variant) in engine::RUNNABLE {
@@ -1377,6 +1526,9 @@ fn e10d_every_runnable_pair_hashes_distinctly() {
                 delistings: Some(delistings.as_path()),
                 marketcap: Some(marketcap.as_path()),
                 filings: Some(filings.as_path()),
+                // Only the ridge program ranks on them, and every other
+                // program's wiring guard refuses a file it never reads.
+                predictions: (*program == engine::RIDGE_PROGRAM).then_some(predictions.as_path()),
             },
         )
         .expect("the backtest runs");
@@ -1456,6 +1608,7 @@ fn e10e_an_unknown_variant_produces_no_figure() {
                 delistings: None,
                 marketcap: None,
                 filings: None,
+                predictions: None,
             },
         )
         .expect("a refused configuration is still a completed command");
@@ -1560,7 +1713,7 @@ fn e9e_the_n_caveat_prints_beside_every_dsr_block() {
 /// are not what the finding was about.
 #[test]
 fn x_w2_the_attachment_paths_are_never_read_twice() {
-    let (prices, universe, actions, delistings, marketcap, filings) =
+    let (prices, universe, actions, delistings, marketcap, filings, _predictions) =
         registry_dataset("single-read");
 
     let text = fs::read_to_string(&universe).expect("read universe");
@@ -1573,10 +1726,12 @@ fn x_w2_the_attachment_paths_are_never_read_twice() {
 
     // The one read. Everything downstream is served from these buffers.
     let attachments = Attachments::read(
+        prices.as_path(),
         Some(actions.as_path()),
         Some(delistings.as_path()),
         Some(marketcap.as_path()),
         Some(filings.as_path()),
+        None,
     )
     .expect("the attachments read");
 
@@ -1625,6 +1780,6 @@ fn x_w2_the_attachment_paths_are_never_read_twice() {
         ..BacktestConfig::lowvol_v0(rigor::hash_bytes(text.as_bytes()))
     };
 
-    execute(&prices, attachments, &members, &config)
+    execute(attachments, &members, &config)
         .expect("the run must complete with every attachment file deleted");
 }

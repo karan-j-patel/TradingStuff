@@ -160,6 +160,22 @@ fn e7_the_config_hash_changes_when_any_constant_changes() {
             book_staleness_days: Some(548),
             ..base.clone()
         },
+        // The prices file every run reads. It had no key of its own until the
+        // predictions binding needed one to compare against, and a digest that
+        // lives only inside another hash can be compared with nothing.
+        BacktestConfig {
+            prices_sha256: Some("1".repeat(64)),
+            ..base.clone()
+        },
+        // Which predictions the ranking read is the whole of the ridge signal
+        // rather than an input to computing it, so the file has to reach the
+        // hash on its own. Two fits of the same model over the same panel are
+        // two hypotheses about what predicts returns, and without this they
+        // would record as one trial.
+        BacktestConfig {
+            predictions_sha256: Some("1".repeat(64)),
+            ..base.clone()
+        },
     ];
 
     // One mutation per field. If the struct grows a field, this count is the

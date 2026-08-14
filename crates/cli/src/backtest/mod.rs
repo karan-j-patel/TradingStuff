@@ -68,6 +68,8 @@ pub enum Strategy<'a> {
         marketcap: Option<&'a Path>,
         /// Curated filings, which carry the book equity the value signal reads.
         filings: Option<&'a Path>,
+        /// Curated predictions, which ARE the ridge signal.
+        predictions: Option<&'a Path>,
     },
 }
 
@@ -89,6 +91,7 @@ impl<'a> Strategy<'a> {
         delistings: Option<&'a PathBuf>,
         marketcap: Option<&'a PathBuf>,
         filings: Option<&'a PathBuf>,
+        predictions: Option<&'a PathBuf>,
     ) -> anyhow::Result<Self> {
         match (config, prices, universe) {
             // `--actions`, `--delistings` and `--variant` are refused here
@@ -110,10 +113,15 @@ impl<'a> Strategy<'a> {
                     && delistings.is_none()
                     && marketcap.is_none()
                     && filings.is_none()
+                    && predictions.is_none()
                     && variant.is_none() =>
             {
                 Ok(Strategy::Declared(config))
             }
+            (Some(_), None, None) if predictions.is_some() => anyhow::bail!(
+                "--predictions ARE the ridge signal in an engine run, and --config declares a \
+                 configuration with no engine behind it, so the two cannot go together"
+            ),
             (Some(_), None, None) if filings.is_some() => anyhow::bail!(
                 "--filings carries the book equity a value run reads, and --config declares a \
                  configuration with no engine behind it, so the two cannot go together"
@@ -144,6 +152,7 @@ impl<'a> Strategy<'a> {
                 delistings: delistings.map(PathBuf::as_path),
                 marketcap: marketcap.map(PathBuf::as_path),
                 filings: filings.map(PathBuf::as_path),
+                predictions: predictions.map(PathBuf::as_path),
             }),
             _ => anyhow::bail!(
                 "give either --config, for a configuration with no engine behind it, or \
@@ -191,22 +200,29 @@ impl Attachment {
 /// Gathered into one value rather than threaded as six arguments, so the
 /// read-once rule is stated in one place and a fourth dataset joins without
 /// growing every signature between here and the panel.
-#[derive(Default)]
 pub(crate) struct Attachments {
+    /// The prices file, which every run reads and none makes optional. Carried
+    /// here so its digest describes the bytes that were parsed rather than a
+    /// second read of the same path.
+    pub(crate) prices: Attachment,
     pub(crate) actions: Option<Attachment>,
     pub(crate) delistings: Option<Attachment>,
     pub(crate) marketcap: Option<Attachment>,
     pub(crate) filings: Option<Attachment>,
+    pub(crate) predictions: Option<Attachment>,
 }
 
 impl Attachments {
     pub(crate) fn read(
+        prices: &Path,
         actions: Option<&Path>,
         delistings: Option<&Path>,
         marketcap: Option<&Path>,
         filings: Option<&Path>,
+        predictions: Option<&Path>,
     ) -> anyhow::Result<Self> {
         Ok(Attachments {
+            prices: Attachment::read(prices, "prices")?,
             actions: actions
                 .map(|path| Attachment::read(path, "actions"))
                 .transpose()?,
@@ -218,6 +234,9 @@ impl Attachments {
                 .transpose()?,
             filings: filings
                 .map(|path| Attachment::read(path, "filings"))
+                .transpose()?,
+            predictions: predictions
+                .map(|path| Attachment::read(path, "predictions"))
                 .transpose()?,
         })
     }
@@ -305,6 +324,7 @@ fn evaluate(
             delistings,
             marketcap,
             filings,
+            predictions,
         } => engine_run(
             program,
             variant,
@@ -314,6 +334,7 @@ fn evaluate(
             *delistings,
             *marketcap,
             *filings,
+            *predictions,
         ),
     }
 }
@@ -328,6 +349,7 @@ fn engine_run(
     delistings: Option<&Path>,
     marketcap: Option<&Path>,
     filings: Option<&Path>,
+    predictions: Option<&Path>,
 ) -> (ConfigHash, Outcome) {
     // Used only when the configuration itself cannot be resolved, which happens
     // when the universe file cannot be read or the program names no
@@ -347,10 +369,11 @@ fn engine_run(
 
     // Read before anything is resolved, because the digests the configuration
     // records come out of these same buffers.
-    let attachments = match Attachments::read(actions, delistings, marketcap, filings) {
-        Ok(attachments) => attachments,
-        Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
-    };
+    let attachments =
+        match Attachments::read(prices, actions, delistings, marketcap, filings, predictions) {
+            Ok(attachments) => attachments,
+            Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
+        };
 
     let (config, members) = match resolve(program, variant, universe, delistings, &attachments) {
         Ok(resolved) => resolved,
@@ -361,7 +384,7 @@ fn engine_run(
         Err(error) => return (unresolved(), Outcome::Failed(format!("{error:#}"))),
     };
 
-    match execute(prices, attachments, &members, &config) {
+    match execute(attachments, &members, &config) {
         Ok(report) => (config_hash, Outcome::Ran(Box::new(report))),
         Err(error) => (config_hash, Outcome::Failed(format!("{error:#}"))),
     }
@@ -460,17 +483,18 @@ pub(crate) fn with_digests(
         delistings_sha256: Attachments::sha256(&attachments.delistings),
         marketcap_sha256: Attachments::sha256(&attachments.marketcap),
         filings_sha256: Attachments::sha256(&attachments.filings),
+        prices_sha256: Some(attachments.prices.sha256.clone()),
+        predictions_sha256: Attachments::sha256(&attachments.predictions),
         ..config
     }
 }
 
 pub(crate) fn build_panel(
-    prices: &Path,
     attachments: Attachments,
     members: &HashSet<AssetKey>,
 ) -> anyhow::Result<Panel> {
-    let bars = ingest::parquet::read_prices(prices)
-        .with_context(|| format!("reading curated prices from {}", prices.display()))?;
+    let bars = ingest::parquet::read_prices_from_bytes(attachments.prices.bytes.clone())
+        .context("reading curated prices")?;
 
     // The universe file, not the price file, defines the run. Filtering here is
     // what makes the recorded SHA-256 mean something: a price file that has
@@ -596,17 +620,43 @@ pub(crate) fn build_panel(
         }
     };
 
+    // The fifth attachment, on the same rule as the first four, and the only
+    // one that IS a signal rather than an input to computing one. The file's
+    // own metadata names the panel configuration it was fitted on, which is
+    // printed so a transcript carries the chain back to the characteristics.
+    let panel = match attachments.predictions {
+        None => panel,
+        Some(attachment) => {
+            let provenance =
+                ingest::parquet::predictions_provenance_from_bytes(attachment.bytes.clone())
+                    .context("reading curated predictions provenance")?;
+            let records = ingest::parquet::read_predictions_from_bytes(attachment.bytes)
+                .context("reading curated predictions")?;
+            let read = records.len();
+            let panel = panel.with_predictions(&records, &attachment.sha256, &provenance)?;
+            println!("Read {read} predictions, sha256 {}.", attachment.sha256);
+            println!(
+                "  fitted on the panel file {}, exported under config hash {}",
+                provenance.panel_sha256, provenance.panel.config_hash
+            );
+            println!(
+                "  {} named a security outside the universe file",
+                panel.unmatched_predictions()
+            );
+            panel
+        }
+    };
+
     Ok(panel)
 }
 
 fn execute(
-    prices: &Path,
     attachments: Attachments,
     members: &HashSet<AssetKey>,
     config: &BacktestConfig,
 ) -> anyhow::Result<Report> {
     Ok(engine::backtest(
-        &build_panel(prices, attachments, members)?,
+        &build_panel(attachments, members)?,
         config,
     )?)
 }

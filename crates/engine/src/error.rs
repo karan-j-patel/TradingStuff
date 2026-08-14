@@ -287,6 +287,54 @@ pub enum EngineError {
     )]
     ExportWindowMissing { field: &'static str },
 
+    #[error(
+        "predictions for {ticker} carry two rows for the month-end {month_end}. The curated \
+         writer refuses this shape, so a pair arriving here came around it, and which value the \
+         ranking would use depends on caller order, which is a portfolio nobody chose"
+    )]
+    DuplicatePrediction { ticker: String, month_end: Date },
+
+    #[error(
+        "the configuration names a predictions file ({config_has_predictions}) while the panel \
+         carries attached predictions ({panel_has_predictions}), and those must agree. Otherwise \
+         the run either ranks on a dataset the trial log does not record, or records one it never \
+         read"
+    )]
+    PredictionsWiringMismatch {
+        config_has_predictions: bool,
+        panel_has_predictions: bool,
+    },
+
+    #[error(
+        "the ridge program ranks on fitted predictions and the panel carries none, so every \
+         formation would rank an empty field. A ridge run without its predictions is not a \
+         degraded run, it is a different strategy with no signal at all"
+    )]
+    RidgeMissingPredictions,
+
+    #[error(
+        "the panel's month-ends end at {last_month_end} and the earliest prediction is dated \
+         {first_prediction}, so no formation can rank on one. A run whose test window does not \
+         overlap its predictions produces no result rather than a short one"
+    )]
+    PredictionsOutsidePanel {
+        last_month_end: Date,
+        first_prediction: Date,
+    },
+
+    #[error(
+        "the attached predictions were fitted against {dataset} {fitted} and this run reads \
+         {running}. The model learned its coefficients from one snapshot and would be ranking a \
+         backtest built from another, which is a result nobody can reproduce and nothing else \
+         would notice: both files are valid, both digests are recorded, and the numbers look \
+         ordinary"
+    )]
+    PredictionsProvenanceMismatch {
+        dataset: &'static str,
+        fitted: String,
+        running: String,
+    },
+
     #[error("encoding the configuration for hashing failed")]
     ConfigEncode(#[source] serde_json::Error),
 }

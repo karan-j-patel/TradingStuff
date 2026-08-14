@@ -27,6 +27,7 @@ use ingest::actions::{
 };
 use ingest::adjusted::AdjustedBar;
 use ingest::marketcap::MarketCapRecord;
+use ingest::parquet::{PredictionRow, PredictionsProvenance};
 use ingest::provider::{FundamentalRecord, ReportBasis};
 use ingest::schema::{AssetKey, PermanentId};
 use jiff::civil::Date;
@@ -172,6 +173,10 @@ pub struct Series {
     /// measured on SOLR1). The upstream duplicate rule keys on
     /// `(asset, basis, scope, period_end, as_reported)`, so it forbids neither.
     filings: Vec<FundamentalRecord>,
+    /// Fitted predictions, ascending by month-end, at most one per date. Empty
+    /// until [`Panel::with_predictions`] attaches any, on the same rule as the
+    /// other four attachments.
+    predictions: Vec<(Date, Decimal)>,
 }
 
 impl Series {
@@ -469,6 +474,21 @@ impl Series {
         filing.fields.get(EQUITY_USD).copied()
     }
 
+    /// The prediction made AT `month_end`, if the model produced one.
+    ///
+    /// An exact-date lookup, deliberately unlike `marketcap_at_month_end`'s
+    /// reach-back. The predictions are keyed on the panel's own month-ends
+    /// because that is what the panel export wrote and the fit read back, so a
+    /// near miss is a disagreement about the calendar rather than a vendor
+    /// omitting a row, and reaching back would hide it. `None` is ordinary and
+    /// means the name is not rankable this month.
+    pub fn prediction_at_month_end(&self, month_end: Date) -> Option<Decimal> {
+        self.predictions
+            .binary_search_by(|(date, _)| date.cmp(&month_end))
+            .ok()
+            .map(|index| self.predictions[index].1)
+    }
+
     /// Every date this security has a bar on, for tests and diagnostics.
     pub fn dates(&self) -> impl Iterator<Item = Date> + '_ {
         self.bars.iter().map(|bar| bar.date)
@@ -514,6 +534,15 @@ pub struct Panel {
     filings_sha256: Option<String>,
     /// Filing records naming a security this panel does not hold.
     unmatched_filings: usize,
+    /// SHA-256 of the predictions file this panel's fitted values were built
+    /// from, or `None` if none was attached. Same rule as
+    /// [`Panel::dividends_sha256`] and for the same reason.
+    predictions_sha256: Option<String>,
+    /// Prediction records naming a security this panel does not hold.
+    unmatched_predictions: usize,
+    /// What the attached predictions file said about the data it was fitted on.
+    /// `None` until [`Panel::with_predictions`] attaches any.
+    predictions_provenance: Option<PredictionsProvenance>,
 }
 
 impl Panel {
@@ -548,6 +577,7 @@ impl Panel {
                 exits: Vec::new(),
                 marketcaps: Vec::new(),
                 filings: Vec::new(),
+                predictions: Vec::new(),
             })
             .collect();
 
@@ -577,6 +607,9 @@ impl Panel {
             filings_sha256: None,
             unmatched_filings: 0,
             unmatched_marketcaps: 0,
+            predictions_sha256: None,
+            unmatched_predictions: 0,
+            predictions_provenance: None,
         })
     }
 
@@ -644,6 +677,9 @@ impl Panel {
             unmatched_marketcaps,
             filings_sha256,
             unmatched_filings,
+            predictions_sha256,
+            unmatched_predictions,
+            predictions_provenance,
             ..
         } = self;
 
@@ -684,6 +720,9 @@ impl Panel {
             unmatched_marketcaps,
             filings_sha256,
             unmatched_filings,
+            predictions_sha256,
+            unmatched_predictions,
+            predictions_provenance,
         })
     }
 
@@ -724,6 +763,9 @@ impl Panel {
             unmatched_marketcaps,
             filings_sha256,
             unmatched_filings,
+            predictions_sha256,
+            unmatched_predictions,
+            predictions_provenance,
             ..
         } = self;
 
@@ -761,6 +803,9 @@ impl Panel {
             unmatched_marketcaps,
             filings_sha256,
             unmatched_filings,
+            predictions_sha256,
+            unmatched_predictions,
+            predictions_provenance,
         })
     }
 
@@ -814,6 +859,9 @@ impl Panel {
             unmatched_delistings,
             filings_sha256,
             unmatched_filings,
+            predictions_sha256,
+            unmatched_predictions,
+            predictions_provenance,
             ..
         } = self;
 
@@ -853,6 +901,9 @@ impl Panel {
             unmatched_marketcaps,
             filings_sha256,
             unmatched_filings,
+            predictions_sha256,
+            unmatched_predictions,
+            predictions_provenance,
         })
     }
 
@@ -952,6 +1003,9 @@ impl Panel {
             unmatched_delistings,
             marketcaps_sha256,
             unmatched_marketcaps,
+            predictions_sha256,
+            unmatched_predictions,
+            predictions_provenance,
             ..
         } = self;
 
@@ -1003,11 +1057,135 @@ impl Panel {
             unmatched_marketcaps,
             filings_sha256: Some(sha256.to_owned()),
             unmatched_filings,
+            predictions_sha256,
+            unmatched_predictions,
+            predictions_provenance,
+        })
+    }
+
+    /// A new panel carrying the fitted predictions in `records`.
+    ///
+    /// Consumes and returns, exactly as the other four attachments do and for
+    /// the same reason.
+    ///
+    /// # Why a duplicate is refused here as well as at the writer
+    ///
+    /// The curated writer refuses two rows for one `(asset, month_end)`, but
+    /// this method accepts records from any caller. Two predictions for one
+    /// name on one month-end would leave the accessor serving whichever the
+    /// sort happened to land on, which is a number nobody chose and a portfolio
+    /// that depends on it.
+    pub fn with_predictions(
+        self,
+        records: &[PredictionRow],
+        sha256: &str,
+        provenance: &PredictionsProvenance,
+    ) -> Result<Panel, EngineError> {
+        let mut by_identity: BTreeMap<String, Vec<(Date, Decimal)>> = BTreeMap::new();
+        for record in records {
+            by_identity
+                .entry(identity(&record.asset))
+                .or_default()
+                .push((record.month_end, record.predicted_return_1m));
+        }
+
+        let Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_sha256,
+            unmatched_dividends,
+            non_cash_actions,
+            delistings_sha256,
+            unmatched_delistings,
+            marketcaps_sha256,
+            unmatched_marketcaps,
+            filings_sha256,
+            unmatched_filings,
+            ..
+        } = self;
+
+        let mut unmatched_predictions = 0usize;
+        let securities: Vec<Series> = securities
+            .into_iter()
+            .map(|series| {
+                let mut predictions = by_identity.remove(&series.identity).unwrap_or_default();
+                // Ascending by month-end, because the lookup is a binary search
+                // and a fixture that happened to supply them sorted would
+                // otherwise be the only reason that held.
+                predictions.sort_by_key(|(date, _)| *date);
+                for pair in predictions.windows(2) {
+                    if pair[0].0 == pair[1].0 {
+                        return Err(EngineError::DuplicatePrediction {
+                            ticker: series.asset.ticker.clone(),
+                            month_end: pair[0].0,
+                        });
+                    }
+                }
+                Ok(Series {
+                    predictions,
+                    ..series
+                })
+            })
+            .collect::<Result<Vec<Series>, EngineError>>()?;
+
+        for leftover in by_identity.values() {
+            unmatched_predictions += leftover.len();
+        }
+
+        Ok(Panel {
+            securities,
+            dates,
+            month_ends,
+            dividends_sha256,
+            unmatched_dividends,
+            non_cash_actions,
+            delistings_sha256,
+            unmatched_delistings,
+            marketcaps_sha256,
+            unmatched_marketcaps,
+            filings_sha256,
+            unmatched_filings,
+            predictions_sha256: Some(sha256.to_owned()),
+            unmatched_predictions,
+            predictions_provenance: Some(provenance.clone()),
         })
     }
 
     pub fn securities(&self) -> &[Series] {
         &self.securities
+    }
+
+    /// Whether a predictions file was attached, however little of it matched.
+    pub fn predictions_attached(&self) -> bool {
+        self.predictions_sha256.is_some()
+    }
+
+    /// The digest of the predictions file the fitted values came from.
+    pub fn predictions_sha256(&self) -> Option<&str> {
+        self.predictions_sha256.as_deref()
+    }
+
+    /// Prediction records naming a security outside this panel.
+    pub fn unmatched_predictions(&self) -> usize {
+        self.unmatched_predictions
+    }
+
+    /// What the attached predictions file says about the data it was fitted on.
+    pub fn predictions_provenance(&self) -> Option<&PredictionsProvenance> {
+        self.predictions_provenance.as_ref()
+    }
+
+    /// The earliest month-end any security carries a prediction for.
+    ///
+    /// `None` when nothing was attached or nothing matched. This is what bounds
+    /// a ridge run: the model produced no forecast before it, so a formation
+    /// there would rank an empty field rather than a thin one.
+    pub fn first_prediction_month(&self) -> Option<Date> {
+        self.securities
+            .iter()
+            .filter_map(|series| series.predictions.first().map(|(date, _)| *date))
+            .min()
     }
 
     /// Whether an actions file was attached, however little of it applied.

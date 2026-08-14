@@ -82,10 +82,13 @@ pub(crate) fn panel_report(
     // records, and which then travel into the file's own metadata, come out of
     // these same buffers.
     let attachments = Attachments::read(
+        prices,
         Some(actions),
         Some(delistings),
         Some(marketcap),
         Some(filings),
+        // The export produces the panel a fit reads; it ranks on nothing.
+        None,
     )?;
     let (universe_sha256, members) = read_universe(universe)?;
     let config = with_digests(
@@ -95,12 +98,14 @@ pub(crate) fn panel_report(
     );
     let config_hash = config.config_hash()?;
 
-    let panel = build_panel(prices, attachments, &members)?;
+    let prices_sha256 = attachments.prices.sha256.clone();
+    let panel = build_panel(attachments, &members)?;
     let rows = engine::export::characteristics(&panel, &config)?;
 
     let provenance = PanelProvenance {
         config_hash: config_hash.as_str().to_owned(),
         universe_sha256: config.universe_sha256.clone(),
+        prices_sha256,
         actions_sha256: digest("actions", &config.actions_sha256)?,
         delistings_sha256: digest("delistings", &config.delistings_sha256)?,
         marketcap_sha256: digest("market cap", &config.marketcap_sha256)?,

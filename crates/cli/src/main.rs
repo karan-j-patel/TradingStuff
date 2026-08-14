@@ -111,6 +111,12 @@ enum Command {
         /// so a run against a refetched file is a different trial
         #[arg(long, requires = "prices")]
         filings: Option<PathBuf>,
+        /// Curated predictions Parquet. Its predicted next-month return IS the
+        /// ridge signal rather than an input to computing one, so its SHA-256
+        /// goes into the configuration hash and two fits of the same model are
+        /// two trials
+        #[arg(long, requires = "prices")]
+        predictions: Option<PathBuf>,
     },
 
     /// Report which data providers this machine is configured for
@@ -184,6 +190,7 @@ fn main() -> ExitCode {
             delistings,
             marketcap,
             filings,
+            predictions,
         } => backtest::Strategy::from_args(
             config.as_deref(),
             variant.as_deref(),
@@ -193,6 +200,7 @@ fn main() -> ExitCode {
             delistings.as_ref(),
             marketcap.as_ref(),
             filings.as_ref(),
+            predictions.as_ref(),
         )
         .and_then(|strategy| backtest::run(&trials, &program, variant.as_deref(), &strategy)),
         Command::Ingest { action } => ingest::run(action.as_ref()),

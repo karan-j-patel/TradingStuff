@@ -26,6 +26,7 @@ mod eligibility;
 mod export;
 mod hashing;
 mod lowvol;
+mod ridge;
 mod screens;
 mod turnover;
 mod value;

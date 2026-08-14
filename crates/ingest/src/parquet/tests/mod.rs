@@ -23,6 +23,7 @@ mod from_bytes;
 mod marketcap;
 mod ordering;
 mod panel;
+mod predictions;
 mod strictness;
 mod validation;
 

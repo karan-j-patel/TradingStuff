@@ -231,6 +231,12 @@ pub(crate) fn rebalance_at(
             // market cap at the formation returns `None` here and is dropped
             // just below, which is what puts the exclusion BEFORE the ranking.
             Strategy::Value => crate::value::book_to_market(panel, position, date, staleness),
+            // Read rather than computed. A name the fit produced no number for
+            // at this month-end is not rankable and leaves the field here,
+            // before the quintile is taken, which is what makes a missing
+            // prediction an ineligibility counted in the census rather than an
+            // error or a name ranked at zero.
+            Strategy::Ridge => panel.securities()[position].prediction_at_month_end(date),
             // Returned at the top of this function. The arm exists because the
             // compiler cannot see that, and it never runs.
             Strategy::ConservativeFormula => {
@@ -305,7 +311,7 @@ pub(crate) fn rebalance_at(
         // Both want the largest signal first: the strongest trend, and the
         // cheapest book. Grouped rather than duplicated so the tie-break cannot
         // drift between them.
-        Strategy::Momentum | Strategy::Value => {
+        Strategy::Momentum | Strategy::Value | Strategy::Ridge => {
             ranked.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
         }
         Strategy::LowVolatility => {

@@ -26,6 +26,7 @@ fn provenance() -> PanelProvenance {
     PanelProvenance {
         config_hash: "c".repeat(64),
         universe_sha256: "1".repeat(64),
+        prices_sha256: "7".repeat(64),
         actions_sha256: "2".repeat(64),
         delistings_sha256: "3".repeat(64),
         marketcap_sha256: "4".repeat(64),
@@ -193,7 +194,7 @@ fn x_r8_a_blank_digest_is_refused() {
     let path = scratch("x-r8-blank").join("panel.parquet");
     let mut metadata = full_metadata();
     for entry in metadata.iter_mut() {
-        if entry.0 == DIGEST_KEYS[4] {
+        if entry.0 == DIGEST_KEYS[5] {
             entry.1 = "   ".to_string();
         }
     }
@@ -203,7 +204,7 @@ fn x_r8_a_blank_digest_is_refused() {
     assert!(
         matches!(
             error,
-            CurateError::UnexpectedMetadata { key, .. } if key == DIGEST_KEYS[4]
+            CurateError::UnexpectedMetadata { key, .. } if key == DIGEST_KEYS[5]
         ),
         "got {error:?}"
     );
@@ -292,10 +293,11 @@ fn full_metadata() -> Vec<(&'static str, String)> {
     let provenance = provenance();
     let mut metadata = vec![(CONFIG_HASH_KEY, provenance.config_hash.clone())];
     metadata.push((DIGEST_KEYS[0], provenance.universe_sha256));
-    metadata.push((DIGEST_KEYS[1], provenance.actions_sha256));
-    metadata.push((DIGEST_KEYS[2], provenance.delistings_sha256));
-    metadata.push((DIGEST_KEYS[3], provenance.marketcap_sha256));
-    metadata.push((DIGEST_KEYS[4], provenance.filings_sha256));
+    metadata.push((DIGEST_KEYS[1], provenance.prices_sha256));
+    metadata.push((DIGEST_KEYS[2], provenance.actions_sha256));
+    metadata.push((DIGEST_KEYS[3], provenance.delistings_sha256));
+    metadata.push((DIGEST_KEYS[4], provenance.marketcap_sha256));
+    metadata.push((DIGEST_KEYS[5], provenance.filings_sha256));
     metadata
 }
 

@@ -331,6 +331,17 @@ pub(crate) fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(),
         });
     }
 
+    // Once more, one dataset over again. The predictions ARE the ridge signal
+    // rather than an input to computing it, so a run that ranked on them
+    // without recording which file they came from is not reproducible from the
+    // log by any route at all.
+    if config.predictions_sha256.is_some() != panel.predictions_attached() {
+        return Err(EngineError::PredictionsWiringMismatch {
+            config_has_predictions: config.predictions_sha256.is_some(),
+            panel_has_predictions: panel.predictions_attached(),
+        });
+    }
+
     // Presence agreeing is not identity agreeing. Every check above asks only
     // whether a dataset was named and attached, and a configuration recording
     // the digest of file A while the panel holds file B passes all three. That
@@ -362,6 +373,11 @@ pub(crate) fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(),
             "filings",
             config.filings_sha256.as_deref(),
             panel.filings_sha256(),
+        ),
+        (
+            "predictions",
+            config.predictions_sha256.as_deref(),
+            panel.predictions_sha256(),
         ),
     ] {
         if let (Some(recorded), Some(attached)) = (recorded, attached)
@@ -413,6 +429,17 @@ pub(crate) fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(),
         });
     }
 
+    check_predictions_binding(panel, config)?;
+
+    // The ridge program refuses the degraded run rather than producing one, on
+    // the rule the conservative formula and the value program follow. Without
+    // predictions it has no signal at all, and every formation would rank an
+    // empty field, which surfaces as an eligibility collapse naming the
+    // universe rather than the missing file.
+    if config.strategy == Strategy::Ridge && !panel.predictions_attached() {
+        return Err(EngineError::RidgeMissingPredictions);
+    }
+
     // Value weighting needs the market caps themselves, which is a stronger
     // requirement than the hash agreement checked above. A run asked for
     // `--variant value-weighted` with no `--marketcap` argument satisfies that
@@ -434,6 +461,83 @@ pub(crate) fn check_wiring(panel: &Panel, config: &BacktestConfig) -> Result<(),
     // boundary where the configuration and the panel are compared.
     if config.weighting == Weighting::ValueByMarketcap && !panel.marketcaps_attached() {
         return Err(EngineError::ValueWeightingMissingMarketcaps);
+    }
+    Ok(())
+}
+
+/// Every dataset the predictions were fitted on is the one this run reads.
+///
+/// # Why a digest-by-digest comparison and not a single hash
+///
+/// The predictions file carries the panel's whole provenance block, and the
+/// obvious check would be to compare its `config_hash` against this run's. That
+/// cannot work: a ridge run's configuration differs from the export's by
+/// construction, so the two hashes are never equal even when both read
+/// identical bytes. The comparable quantities are the digests themselves.
+///
+/// # What is compared, and what deliberately is not
+///
+/// Every digest present in BOTH the file's provenance and this run. A dataset
+/// the run does not attach is not comparable and is not an error: ridge-v0
+/// reads no filings, so the filings digest the fit recorded has nothing to be
+/// checked against, and refusing on it would make the program unrunnable.
+///
+/// `panel_sha256` is NOT bound here and cannot be. The backtest never reads
+/// panel.parquet; it builds its panel in memory from the raw datasets, so there
+/// is no panel file among this run's inputs to compare against. It stays in the
+/// file as traceability for a human, and the digest-by-digest comparison below
+/// is what actually closes the chain.
+///
+/// # What this prevents
+///
+/// A model fitted on one snapshot ranking a backtest built from another. Both
+/// files are valid, both digests are recorded, every existing guard passes, and
+/// the returns look ordinary. Nothing else in the system can see it.
+fn check_predictions_binding(panel: &Panel, config: &BacktestConfig) -> Result<(), EngineError> {
+    let Some(fitted) = panel.predictions_provenance() else {
+        return Ok(());
+    };
+    for (dataset, fitted, running) in [
+        (
+            "universe",
+            Some(fitted.panel.universe_sha256.as_str()),
+            Some(config.universe_sha256.as_str()),
+        ),
+        (
+            "prices",
+            Some(fitted.panel.prices_sha256.as_str()),
+            config.prices_sha256.as_deref(),
+        ),
+        (
+            "actions",
+            Some(fitted.panel.actions_sha256.as_str()),
+            config.actions_sha256.as_deref(),
+        ),
+        (
+            "delistings",
+            Some(fitted.panel.delistings_sha256.as_str()),
+            config.delistings_sha256.as_deref(),
+        ),
+        (
+            "marketcap",
+            Some(fitted.panel.marketcap_sha256.as_str()),
+            config.marketcap_sha256.as_deref(),
+        ),
+        (
+            "filings",
+            Some(fitted.panel.filings_sha256.as_str()),
+            config.filings_sha256.as_deref(),
+        ),
+    ] {
+        if let (Some(fitted), Some(running)) = (fitted, running)
+            && fitted != running
+        {
+            return Err(EngineError::PredictionsProvenanceMismatch {
+                dataset,
+                fitted: fitted.to_owned(),
+                running: running.to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -505,7 +609,7 @@ pub fn schedule(panel: &Panel, config: &BacktestConfig) -> Result<Vec<Rebalance>
     let stride = config.rebalance_every_months;
 
     let month_ends = panel.month_ends();
-    let lead_in = config.required_lead_in();
+    let lead_in = ridge_lead_in(panel, config, config.required_lead_in())?;
     // Two formation dates are needed after the lead-in, one to buy on and one
     // to sell on, and they are a stride apart rather than a month apart.
     if month_ends.len() <= lead_in + stride {
@@ -534,6 +638,42 @@ pub fn schedule(panel: &Panel, config: &BacktestConfig) -> Result<Vec<Rebalance>
         });
     }
     Ok(rebalances)
+}
+
+/// Where a ridge run's formations start.
+///
+/// The model produced no forecast before its first test month, so a formation
+/// there would rank an empty field and the run would fail as an eligibility
+/// collapse naming the universe. The schedule starts at the first month-end
+/// that HAS a prediction instead, which is what makes the backtest span the
+/// test years and nothing else.
+///
+/// Every other strategy is unaffected and keeps its own lead-in, which is what
+/// keeps their runs byte-identical to the code from before this existed.
+///
+/// The refusal is for the case the clamp cannot fix: predictions that do not
+/// overlap the panel at all. That is a wiring mistake rather than a short run,
+/// and producing zero formations from it would report an empty result rather
+/// than the cause.
+fn ridge_lead_in(
+    panel: &Panel,
+    config: &BacktestConfig,
+    lead_in: usize,
+) -> Result<usize, EngineError> {
+    if config.strategy != Strategy::Ridge {
+        return Ok(lead_in);
+    }
+    let month_ends = panel.month_ends();
+    let Some(first) = panel.first_prediction_month() else {
+        return Err(EngineError::RidgeMissingPredictions);
+    };
+    match month_ends.iter().position(|date| *date >= first) {
+        Some(index) => Ok(index.max(lead_in)),
+        None => Err(EngineError::PredictionsOutsidePanel {
+            last_month_end: month_ends[month_ends.len() - 1],
+            first_prediction: first,
+        }),
+    }
 }
 
 /// Run the configured strategy and both baselines over a panel.

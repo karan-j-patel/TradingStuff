@@ -5,18 +5,18 @@
 //! one this codebase produces rather than fetches, which changes what its
 //! provenance has to say.
 //!
-//! # Why the provenance is six digests rather than a units label
+//! # Why the provenance is seven values rather than a units label
 //!
-//! The other five datasets carry a vendor's rows, so the question a reader has
+//! The other six datasets carry a vendor's rows, so the question a reader has
 //! is what units the vendor shipped and who the vendor was. This file carries
 //! numbers that came out of the engine, so the question is instead which inputs
 //! and which configuration produced them. That is answered by the hash of the
 //! exporting configuration together with the digest of every file it read, and
-//! those six values name the run exactly rather than describing it.
+//! those seven values name the run exactly rather than describing it.
 //!
 //! A source label would be strictly weaker here. "Sharadar" does not say which
-//! prices, and the five digests do. So [`read_panel`] refuses a file missing any
-//! of the six rather than checking [`super::prices::SOURCE_KEY`], which is why
+//! prices, and the six digests do. So [`read_panel`] refuses a file missing any
+//! of the seven rather than checking [`super::prices::SOURCE_KEY`], which is why
 //! this dataset does not go through [`super::units_and_source`]: that helper
 //! checks exactly two keys and would pass a file carrying none of these.
 //!
@@ -72,15 +72,20 @@ pub const CONFIG_HASH_KEY: &str = "config_hash";
 
 /// The metadata keys carrying the digest of every file the export read.
 ///
-/// Five, because the exporting configuration records exactly five: the universe
-/// list and the four attached datasets. The prices file has no digest of its
-/// own anywhere in this system, and adding one here would be inventing a field
-/// the configuration hash does not cover.
+/// Six: the universe list, the prices file, and the four attached datasets.
+///
+/// Prices is here even though every run has one and it is never optional. A
+/// digest that lives only inside `config_hash` cannot be compared against
+/// anything, because a run ranking on a different strategy has a different
+/// config hash by construction, so the two can never be equal even when they
+/// read identical bytes. The binding a predictions file needs is digest by
+/// digest, and that requires each digest to be its own key.
 ///
 /// One list rather than five constants, so the writer, the reader and the
 /// provenance struct cannot disagree about which digests a file must carry.
 pub const DIGEST_KEYS: &[&str] = &[
     "universe_sha256",
+    "prices_sha256",
     "actions_sha256",
     "delistings_sha256",
     "marketcap_sha256",
@@ -97,6 +102,7 @@ pub struct PanelProvenance {
     /// The exporting [`crate`]-external configuration's canonical hash.
     pub config_hash: String,
     pub universe_sha256: String,
+    pub prices_sha256: String,
     pub actions_sha256: String,
     pub delistings_sha256: String,
     pub marketcap_sha256: String,
@@ -104,10 +110,11 @@ pub struct PanelProvenance {
 }
 
 impl PanelProvenance {
-    /// The five digests in [`DIGEST_KEYS`] order.
-    fn digests(&self) -> [&str; 5] {
+    /// The six digests in [`DIGEST_KEYS`] order.
+    fn digests(&self) -> [&str; 6] {
         [
             &self.universe_sha256,
+            &self.prices_sha256,
             &self.actions_sha256,
             &self.delistings_sha256,
             &self.marketcap_sha256,
@@ -217,7 +224,7 @@ pub fn write_panel(
     // Refused rather than written. A file whose provenance cannot be read back
     // is one nobody can reproduce, and the reader refuses it anyway, so writing
     // it would only move the failure to whoever picks the file up next.
-    check_provenance(provenance)?;
+    check_provenance(DATASET, provenance)?;
 
     let rows = super::prepare(DATASET, rows, |row| {
         super::RowKey::simple(&row.asset, row.month_end)
@@ -309,7 +316,10 @@ pub fn panel_provenance(path: &Path) -> Result<PanelProvenance, CurateError> {
     let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
         super::open(path)?,
     )?;
-    provenance_of(builder.metadata().file_metadata().key_value_metadata())
+    provenance_of(
+        DATASET,
+        builder.metadata().file_metadata().key_value_metadata(),
+    )
 }
 
 /// How many characteristic columns sit between the key and the flags.
@@ -355,7 +365,7 @@ fn stored(field: &'static str, value: Decimal) -> Result<i128, CurateError> {
 }
 
 /// The six key-value pairs a panel file carries.
-fn provenance_metadata(provenance: &PanelProvenance) -> Vec<(&str, &str)> {
+pub(crate) fn provenance_metadata(provenance: &PanelProvenance) -> Vec<(&str, &str)> {
     let mut metadata = vec![(CONFIG_HASH_KEY, provenance.config_hash.as_str())];
     metadata.extend(DIGEST_KEYS.iter().copied().zip(provenance.digests()));
     metadata
@@ -365,7 +375,10 @@ fn provenance_metadata(provenance: &PanelProvenance) -> Vec<(&str, &str)> {
 ///
 /// Applied by the writer and, through [`provenance_of`], by the reader, so a
 /// file cannot exist with less than a reader demands.
-fn check_provenance(provenance: &PanelProvenance) -> Result<(), CurateError> {
+pub(crate) fn check_provenance(
+    dataset: &'static str,
+    provenance: &PanelProvenance,
+) -> Result<(), CurateError> {
     // Both halves of the chain yield `&'static str`, which is what
     // `CurateError`'s key field takes, so the key travels into the error
     // without being looked up again.
@@ -374,7 +387,7 @@ fn check_provenance(provenance: &PanelProvenance) -> Result<(), CurateError> {
     for (key, value) in named {
         if value.trim().is_empty() {
             return Err(CurateError::UnexpectedMetadata {
-                dataset: DATASET,
+                dataset,
                 key,
                 expected: "a non-empty hex digest",
                 found: value.to_owned(),
@@ -384,7 +397,7 @@ fn check_provenance(provenance: &PanelProvenance) -> Result<(), CurateError> {
     Ok(())
 }
 
-/// Read the six keys, refusing a file that declares less than all of them.
+/// Read the seven keys, refusing a file that declares less than all of them.
 ///
 /// # Why this does not go through `units_and_source`
 ///
@@ -392,7 +405,10 @@ fn check_provenance(provenance: &PanelProvenance) -> Result<(), CurateError> {
 /// panel file carries neither. A reader that called it would pass a file with
 /// no configuration hash and no digests at all, which is exactly the file this
 /// check exists to refuse.
-fn provenance_of(metadata: Option<&Vec<KeyValue>>) -> Result<PanelProvenance, CurateError> {
+pub(crate) fn provenance_of(
+    dataset: &'static str,
+    metadata: Option<&Vec<KeyValue>>,
+) -> Result<PanelProvenance, CurateError> {
     let value = |key: &'static str| -> Result<String, CurateError> {
         metadata
             .into_iter()
@@ -400,23 +416,21 @@ fn provenance_of(metadata: Option<&Vec<KeyValue>>) -> Result<PanelProvenance, Cu
             .find(|entry| entry.key == key)
             .and_then(|entry| entry.value.as_deref())
             .map(str::to_owned)
-            .ok_or(CurateError::MissingMetadata {
-                dataset: DATASET,
-                key,
-            })
+            .ok_or(CurateError::MissingMetadata { dataset, key })
     };
 
     let provenance = PanelProvenance {
         config_hash: value(CONFIG_HASH_KEY)?,
         universe_sha256: value(DIGEST_KEYS[0])?,
-        actions_sha256: value(DIGEST_KEYS[1])?,
-        delistings_sha256: value(DIGEST_KEYS[2])?,
-        marketcap_sha256: value(DIGEST_KEYS[3])?,
-        filings_sha256: value(DIGEST_KEYS[4])?,
+        prices_sha256: value(DIGEST_KEYS[1])?,
+        actions_sha256: value(DIGEST_KEYS[2])?,
+        delistings_sha256: value(DIGEST_KEYS[3])?,
+        marketcap_sha256: value(DIGEST_KEYS[4])?,
+        filings_sha256: value(DIGEST_KEYS[5])?,
     };
     // A key present and blank passes the lookup above and carries no
     // provenance, which is the gap a presence-only rule leaves open.
-    check_provenance(&provenance)?;
+    check_provenance(dataset, &provenance)?;
     Ok(provenance)
 }
 
@@ -424,7 +438,10 @@ fn provenance_of(metadata: Option<&Vec<KeyValue>>) -> Result<PanelProvenance, Cu
 /// other. The provenance check runs before a row is decoded on both.
 fn decode<R: ChunkReader + 'static>(source: R) -> Result<Vec<PanelRow>, CurateError> {
     let builder = ::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(source)?;
-    provenance_of(builder.metadata().file_metadata().key_value_metadata())?;
+    provenance_of(
+        DATASET,
+        builder.metadata().file_metadata().key_value_metadata(),
+    )?;
     let reader = builder.build()?;
 
     let mut rows = Vec::new();

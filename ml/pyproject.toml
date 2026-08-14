@@ -1,0 +1,19 @@
+[project]
+name = "ridge-baseline"
+version = "0.1.0"
+description = "Ridge baseline fit on the exported characteristic panel."
+requires-python = ">=3.12"
+dependencies = [
+    "numpy==2.5.2",
+    "pyarrow==25.0.1",
+    "scikit-learn==1.9.0",
+]
+
+# No dataframe library. The only tabular operation is a rank within a month over
+# an array already sorted by month, which numpy does in a few lines, and pyarrow
+# is a required dependency anyway because the provenance metadata has to survive
+# the round trip. Adding pandas or polars for one groupby buys nothing and pins
+# a fourth version.
+
+[tool.uv]
+package = false

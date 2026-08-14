@@ -34,10 +34,11 @@ pub use adjust::{
 pub use adjusted::{AdjustedBar, validate_adjusted};
 pub use marketcap::{MarketCapRecord, MarketCapReject, validate_marketcap};
 pub use parquet::{
-    CurateError, DEFAULT_DATA_ROOT, PanelProvenance, PanelRow, actions_path, data_root,
-    delistings_path, marketcap_path, panel_path, prices_path, read_actions, read_delistings,
-    read_marketcap, read_panel, read_prices, write_actions, write_delistings, write_marketcap,
-    write_panel, write_prices,
+    CurateError, DEFAULT_DATA_ROOT, PanelProvenance, PanelRow, PredictionRow,
+    PredictionsProvenance, actions_path, data_root, delistings_path, marketcap_path, panel_path,
+    predictions_path, prices_path, read_actions, read_delistings, read_marketcap, read_panel,
+    read_predictions, read_prices, write_actions, write_delistings, write_marketcap, write_panel,
+    write_predictions, write_prices,
 };
 pub use provider::{
     DateRange, FilingKey, FundamentalRecord, FundamentalSource, PriceSource, ReportBasis,

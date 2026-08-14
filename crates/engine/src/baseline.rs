@@ -45,6 +45,21 @@ pub const LINEAR_BASELINE_NOTE_CONSERVATIVE: &str = "The strategy is itself a li
      FITTED linear baseline over the same features is not run here and joins at the ridge \
      milestone; until then this comparison is missing rather than satisfied.";
 
+/// The note belonging to the ridge program.
+///
+/// Rule 5 asks every result to report a linear model on the same features
+/// beside it. For this program that comparison is not missing and is not a
+/// separate run: the strategy IS a fitted linear model over the panel's
+/// characteristics, which is exactly what the other programs' notes say has not
+/// been run yet. What this program owes instead is the comparison against the
+/// single-signal programs it is meant to beat, and that is a question about
+/// their recorded Sharpes rather than about a baseline this run can compute.
+pub const LINEAR_BASELINE_NOTE_RIDGE: &str = "The strategy IS the fitted linear baseline rule 5 asks for: ridge regression over \
+     the characteristic panel, fitted on training years only. So this comparison is \
+     satisfied by the strategy rather than by a separate run. What it does NOT settle is \
+     whether the combination beats its parts; that is the single-signal programs' own \
+     recorded Sharpes, printed beside this one.";
+
 /// The note belonging to a strategy.
 ///
 /// A function rather than a caller choosing, on the rule [`crate::run::caveats`]
@@ -57,6 +72,7 @@ pub fn linear_baseline_note(strategy: crate::config::Strategy) -> &'static str {
         | crate::config::Strategy::LowVolatility
         | crate::config::Strategy::Value => LINEAR_BASELINE_NOTE,
         crate::config::Strategy::ConservativeFormula => LINEAR_BASELINE_NOTE_CONSERVATIVE,
+        crate::config::Strategy::Ridge => LINEAR_BASELINE_NOTE_RIDGE,
     }
 }
 
